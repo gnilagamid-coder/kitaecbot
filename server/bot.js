@@ -31,6 +31,21 @@ function shopWebAppUrl(s) {
   return '';
 }
 
+// Текст кнопки меню (MenuButtonWebApp.text — обязательное и непустое поле).
+// Берём buttonText магазина, срезаем эмодзи/пробелы в начале и пустой остаток
+// заменяем запасным названием. Раньше здесь стоял replace(/^\W+/) без флага u:
+// в JS \W = [^A-Za-z0-9_], поэтому кириллица тоже считалась «мусором» и
+// строка «🛍 Открыть магазин» вычищалась целиком — Telegram отвечал
+// «menu button text must be non-empty» на каждом старте.
+function menuButtonText(s) {
+  const cleaned = String(s.bot.buttonText || '')
+    .trim()
+    .replace(/^[\s\p{Extended_Pictographic}]+/u, '')
+    .trim()
+    .slice(0, 20);
+  return cleaned || 'Магазин';
+}
+
 function menuKeyboard(s, chatId) {
   const link = s.channel.miniAppLink;
   const rows = [];
@@ -122,6 +137,7 @@ async function handleUpdate(update) {
 
 async function notifyManagers(s, text) {
   const appUrl = shopWebAppUrl(s);
+  let failed = 0;
   for (const id of s.notify.chatIds) {
     const payload = {
       chat_id: id, text, parse_mode: 'HTML',
@@ -133,8 +149,13 @@ async function notifyManagers(s, text) {
     if (appUrl && Number(id) > 0) {
       payload.reply_markup = { inline_keyboard: [[{ text: s.bot.buttonText, web_app: { url: appUrl } }]] };
     }
-    await tgApi('sendMessage', payload);
+    const res = await tgApi('sendMessage', payload);
+    if (!res.ok) {
+      failed++;
+      console.error(`[notify] менеджеру ${id} не доставлено: ${res.description}`);
+    }
   }
+  return failed === 0;
 }
 
 const POLL_TIMEOUT = 25;                 // сколько Telegram держит соединение
@@ -231,13 +252,16 @@ async function start() {
       const mb = await tgApi('setChatMenuButton', {
         menu_button: {
           type: 'web_app',
-          text: (s0.bot.buttonText || 'Магазин').replace(/^\W+/, '').slice(0, 20),
+          text: menuButtonText(s0),
           web_app: { url: appUrl },
         },
       });
       if (mb.ok) console.log(`[bot] кнопка меню → web_app: ${appUrl}`);
-      else console.warn('[bot] setChatMenuButton не удался:', mb.description,
+      // Подсказка по тексту ошибки: /setdomain помогает только при проблемах
+      // с URL, а «text must be non-empty» — это валидация самого текста.
+      else if (/url|domain/i.test(mb.description || '')) console.warn('[bot] setChatMenuButton не удался:', mb.description,
         '— проверьте домен в @BotFather (/setdomain) или используйте t.me-ссылку мини-аппа');
+      else console.warn('[bot] setChatMenuButton не удался:', mb.description);
     }
   }
 

@@ -144,6 +144,12 @@
   .stat b{display:block;font-family:var(--font-display);font-size:19px;color:var(--accent-2)}
   .stat span{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.3px}
 
+  /* состояние VPS */
+  .vps-row{display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid var(--surface-2);font-size:13px}
+  .vps-row:last-child{border-bottom:none}
+  .vps-row .k{color:var(--muted)}
+  .vps-row b{font-weight:600;text-align:right;overflow-wrap:anywhere}
+
   .order{background:var(--surface);border:1px solid var(--surface-2);padding:12px;margin-bottom:8px}
   .order .head{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:6px}
   .order pre{white-space:pre-wrap;font-family:inherit;font-size:12.5px;line-height:1.5}
@@ -839,7 +845,6 @@ const PANEL_CHECKOUT = () => ([
     F.sw('checkout.askName','Имя'),
     F.sw('checkout.askPhone','Телефон'),
     F.sw('checkout.phoneRequired','Телефон обязателен'),
-    F.sw('checkout.askContact','Ссылка на покупателя'),
     F.sw('checkout.askEmail','Email'),
     F.sw('checkout.askComment','Комментарий к заказу'),
     F.sw('checkout.askAddress','Адрес доставки', { sub:'Показывается, только если заданы способы доставки' }),
@@ -1060,7 +1065,7 @@ const PANEL_BOT = () => ([
     ]},
   { title:'Чек покупателю', fields:[
     F.sw('bot.notifyCustomer','Присылать копию заказа покупателю в чат'),
-    F.area('bot.customerReceiptText','Текст чека', { sub:'Переменные: {order}, {name}' }),
+    F.area('bot.customerReceiptText','Текст чека', { sub:'Переменные: {name}, {id} — номер заказа, {total} — сумма' }),
   ]},
 ]);
 
@@ -1180,6 +1185,12 @@ function buildDashboard(){
     </div>
 
     <div class="card">
+      <h2>Сервер (VPS) <button type="button" class="ghost" id="vpsRefresh" style="padding:5px 10px;font-size:11px">Обновить</button></h2>
+      <div class="hint">Аптайм, CPU, память, диск и GPU. Данные кэшируются на сервере — частое обновление ничего ему не стоит.</div>
+      <div id="vpsStatus"><div class="empty">Загружаю…</div></div>
+    </div>
+
+    <div class="card">
       <h2>Ссылки</h2>
       <div class="hint">
         Витрина: <a href="/" target="_blank">${esc(location.origin)}/</a><br>
@@ -1191,6 +1202,14 @@ function buildDashboard(){
     el.onclick = () => selectTab(el.dataset.goto));
   $('diagBtn').onclick = runDiagnostics;
   runDiagnostics();
+  $('vpsRefresh').onclick = loadVpsStatus;
+  loadVpsStatus();
+  // пока открыт «Обзор», обновляем раз в минуту — с серверным кэшем это дёшево
+  clearInterval(vpsTimer);
+  vpsTimer = setInterval(() => {
+    if(activeTab === 'dashboard' && $('vpsStatus')) loadVpsStatus();
+    else clearInterval(vpsTimer);
+  }, 60000);
 }
 
 async function runDiagnostics(){
@@ -1210,6 +1229,38 @@ async function runDiagnostics(){
       </div>
     </div>`).join('') +
     `<div class="hint" style="margin-top:10px">Режим бота: <b>${esc(data.botMode)}</b> · API: <code>${esc(data.apiBase)}</code></div>`;
+}
+
+// ---------- Состояние VPS ----------
+let vpsTimer = 0;
+async function loadVpsStatus(){
+  const box = $('vpsStatus');
+  if(!box) return;
+  let d;
+  try{ d = await api('/api/admin/system'); }
+  catch(e){ box.innerHTML = `<div class="empty">Сервер не ответил: ${esc(e.message)}</div>`; return; }
+
+  const gb = n => (n / 1073741824).toFixed(1) + ' ГБ';
+  const mb = n => Math.round(n / 1048576) + ' МБ';
+  const pct = (u, t) => t ? Math.round(u / t * 100) + '%' : '—';
+  const up = s => {
+    const days = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+    return (days ? days + ' д ' : '') + h + ' ч ' + m + ' м';
+  };
+
+  const rows = [
+    ['Аптайм VPS', up(d.hostUptime)],
+    ['CPU', `${d.cpu}% из ${d.cores} ядер · load ${d.load[0]}`],
+    ['ОЗУ', `${gb(d.mem.used)} из ${gb(d.mem.total)} (${pct(d.mem.used, d.mem.total)})`],
+  ];
+  if(d.disk) rows.push(['Диск', `${gb(d.disk.used)} из ${gb(d.disk.total)} (${pct(d.disk.used, d.disk.total)})`]);
+  rows.push(['GPU', d.gpu
+    ? `${esc(d.gpu.name)} · ${d.gpu.util}% · ${mb(d.gpu.memUsed)}/${mb(d.gpu.memTotal)} · ${d.gpu.temp}°C`
+    : 'не обнаружена']);
+  rows.push(['Процесс магазина', `${up(d.processUptime)} · ${mb(d.rss)} ОЗУ`]);
+
+  box.innerHTML = rows.map(([k, v]) =>
+    `<div class="vps-row"><span class="k">${k}</span><b>${v}</b></div>`).join('');
 }
 
 // ---------- Заказы ----------

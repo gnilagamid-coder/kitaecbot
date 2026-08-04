@@ -82,7 +82,6 @@ const DEFAULTS = {
   checkout: {
     askName: true,
     askPhone: false, phoneRequired: false,
-    askContact: false,
     askEmail: false,
     askComment: false,
     askAddress: true,       // показывается только если есть способы доставки
@@ -91,7 +90,7 @@ const DEFAULTS = {
     requireAgreement: false,
     agreementText: 'Согласен на обработку персональных данных',
     successTitle: 'Заказ оформлен ✅',
-    successText: 'Спасибо! Заказ отправлен менеджеру — ждите обратной связи.',
+    successText: 'Спасибо! Ваш заказ обрабатывается — ждите сообщение от менеджера.',
   },
 
   // --- промокоды ---
@@ -137,8 +136,10 @@ const DEFAULTS = {
     welcomeText: 'Привет, {name}! 👋\nОткрой каталог кнопкой ниже.',
     buttonText: '🛍 Открыть магазин',
     helpText: 'Нажми кнопку ниже, чтобы открыть каталог. По вопросам — /support',
-    notifyCustomer: true,   // присылать покупателю копию заказа в чат
-    customerReceiptText: 'Ваш заказ принят ✅\n\n{order}\n\nМенеджер скоро свяжется с вами.',
+    notifyCustomer: true,   // присылать покупателю подтверждение в чат
+    // Покупателю — только статус и следующий шаг: номер, сумма и срок связи.
+    // Служебная выгрузка заказа («Клиент/Телефон/Товары») остаётся у менеджера.
+    customerReceiptText: 'Спасибо, {name}! Заказ № {id} принят ✅\nСумма: {total}\nМенеджер свяжется с вами в ближайшее время.',
   },
 
   // --- профиль покупателя ---
@@ -187,11 +188,17 @@ function mergeDeep(base, patch) {
 
 function sanitize(input) {
   const s = mergeDeep(DEFAULTS, input || {});
+// Старые дефолтные тексты покупателя. Магазины, которые не меняли их вручную,
+  // при следующей нормализации получают новые: покупатель больше не видит
+  // служебную «менеджерскую» выгрузку заказа.
+  const LEGACY_SUCCESS_TEXT = 'Спасибо! Заказ отправлен менеджеру — ждите обратной связи.';
+  const LEGACY_RECEIPT_TEXT = 'Ваш заказ принят ✅\n\n{order}\n\nМенеджер скоро свяжется с вами.';
+  const LEGACY_RECEIPT_V2 = 'Спасибо, {name}! Ваш заказ принят и обрабатывается ⏳\nМенеджер напишет вам в ближайшее время.';
   const b = s.brand, t = s.theme, c = s.catalog, m = s.commerce;
   const mg = s.manager, ch = s.checkout, n = s.notify, cn = s.channel, bt = s.bot, pr = s.profile, ad = s.advanced;
   const pay = s.payments || {};
 
-  return {
+  const out = {
     version: 2,
     brand: {
       shopName: str(b.shopName, 'MY SHOP', 40).trim() || 'MY SHOP',
@@ -259,7 +266,6 @@ function sanitize(input) {
     checkout: {
       askName: bool(ch.askName, true),
       askPhone: bool(ch.askPhone), phoneRequired: bool(ch.phoneRequired),
-      askContact: bool(ch.askContact),
       askEmail: bool(ch.askEmail),
       askComment: bool(ch.askComment),
       askAddress: bool(ch.askAddress, true),
@@ -337,6 +343,11 @@ function sanitize(input) {
       maintenanceText: str(ad.maintenanceText, DEFAULTS.advanced.maintenanceText, 300),
     },
   };
+
+  if (out.checkout.successText === LEGACY_SUCCESS_TEXT) out.checkout.successText = DEFAULTS.checkout.successText;
+  if (out.bot.customerReceiptText === LEGACY_RECEIPT_TEXT) out.bot.customerReceiptText = DEFAULTS.bot.customerReceiptText;
+  if (out.bot.customerReceiptText === LEGACY_RECEIPT_V2) out.bot.customerReceiptText = DEFAULTS.bot.customerReceiptText;
+  return out;
 }
 
 module.exports = { DEFAULTS, sanitize, mergeDeep };

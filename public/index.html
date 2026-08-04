@@ -403,15 +403,34 @@
   }
   .field textarea{resize:vertical;min-height:66px}
   .field.invalid input,.field.invalid textarea{border-color:var(--accent)}
-  .field-error{color:var(--accent);font-size:calc(11px * var(--fs));margin-top:4px}
-  /* Состав заказа на финальном экране. Раньше заказ был только внутри кнопки
-     «Скопировать» — покупатель не видел, что именно он отправил, и не мог
-     перепроверить сумму или адрес, не выходя из мини-аппа. */
-  .order-receipt{
-    background:var(--surface-2);border-radius:var(--radius);padding:14px;margin-bottom:16px;
-    font-family:inherit;font-size:calc(13px * var(--fs));line-height:1.55;color:var(--text);
-    white-space:pre-wrap;word-break:break-word;max-height:220px;overflow-y:auto;
-  }
+  /* текст ошибки рендерится пустым и показывается только у .invalid —
+     так поле не прыгает при вводе */
+  .field-error{display:none;color:var(--accent);font-size:calc(11px * var(--fs));margin-top:5px;line-height:1.35}
+  .field.invalid .field-error{display:block}
+
+  /* группы формы заказа: контакты / доставка / оплата / детали */
+  .co-group{margin-bottom:16px}
+  .co-group-title{display:flex;align-items:center;gap:8px;font-family:var(--font-display);font-size:calc(12px * var(--fs));letter-spacing:.6px;text-transform:var(--caps);color:var(--accent-2);margin-bottom:10px}
+  .co-group-title::before{content:"";width:14px;height:2px;background:var(--accent);flex:0 0 auto}
+  /* карточки-переключатели для доставки/оплаты */
+  .co-options{display:flex;flex-wrap:wrap;gap:8px}
+  .co-option{width:auto;margin:0;padding:10px 14px;background:var(--surface-2);border:max(1px,var(--bw)) solid transparent;border-radius:var(--radius);color:var(--text);font-size:calc(13px * var(--fs));font-family:inherit;letter-spacing:.2px;transition:border-color .15s,color .15s}
+  .co-option.selected{border-color:var(--accent);color:var(--accent-2)}
+
+  /* экран успеха после заказа */
+  .co-success{text-align:center;padding-top:4px}
+  .co-success .sheet-title{text-align:center}
+  .co-check{width:66px;height:66px;margin:4px auto 14px;border-radius:50%;background:var(--accent);color:var(--on-accent);display:flex;align-items:center;justify-content:center;animation:popIn .35s cubic-bezier(.2,.8,.2,1) both}
+  .co-check svg{width:34px;height:34px}
+  .co-check path{stroke-dasharray:40;stroke-dashoffset:40;animation:coDraw .5s .3s ease-out forwards}
+  @keyframes coDraw{to{stroke-dashoffset:0}}
+  .co-orderno{font-size:calc(12px * var(--fs));color:var(--muted);margin:-4px 0 14px;letter-spacing:.3px}
+  .co-summary{background:var(--surface-2);border-radius:var(--radius);padding:10px 14px;margin-bottom:14px;text-align:left}
+  .co-row{display:flex;justify-content:space-between;gap:12px;font-size:calc(13px * var(--fs));color:var(--muted);padding:5px 0;line-height:1.35}
+  .co-row span:last-child{flex-shrink:0}
+  .co-total-row{border-top:max(1px,var(--bw)) solid var(--bg);margin-top:5px;padding-top:9px;color:var(--text);font-family:var(--font-display);text-transform:var(--caps)}
+  .co-next{font-size:calc(14px * var(--fs));color:var(--muted);line-height:1.55;margin-bottom:16px;white-space:pre-line}
+  .co-copy{color:var(--muted)}
   /* экран возврата из платёжного сервиса */
   .pay-return{position:fixed;inset:0;z-index:70;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:24px}
   .pay-card{max-width:380px;width:100%;text-align:center;background:var(--surface);border-radius:var(--radius);
@@ -1638,6 +1657,7 @@ function quickBuy(p){
     // Раньше здесь делался cart.clear() — заявка по одному товару стирала всё,
     // что покупатель успел набрать. Держим предмет заявки отдельно от корзины.
     inquiryItem = p.id;
+    coDraft = null;
     renderCheckoutForm();
     closeSheet('detailOverlay');
     openSheet('checkoutOverlay');
@@ -1649,13 +1669,40 @@ function quickBuy(p){
   openCheckoutForm();
 }
 
-function selectField(id, label, options){
-  return `<div class="field"><label>${esc(label)}</label><select id="${id}">${options.map(o=>`<option value="${esc(o)}">${esc(o)}</option>`).join('')}</select></div>`;
+// Черновик формы: значения живут в объекте, а не только в DOM, поэтому
+// перерисовка (например, после применения промокода) не стирает то, что
+// покупатель уже успел набрать.
+let coDraft = null;
+function freshDraft(){
+  const c = settings.checkout;
+  return {
+    name: user.first_name || '', phone: '', email: '',
+    payment: (c.paymentMethods||[])[0] || '',
+    delivery: (c.deliveryMethods||[])[0] || '',
+    address: '', comment: '', agree: false,
+    promo: appliedPromo ? appliedPromo.code : '',
+  };
+}
+
+function coField(label, inputHtml){
+  return `<div class="field"><label>${label}</label>${inputHtml}<div class="field-error"></div></div>`;
+}
+
+function coOptions(key, options, current){
+  return `<div class="co-options" role="radiogroup">` + options.map(o => {
+    const on = o === current;
+    return `<button type="button" role="radio" aria-checked="${on}" class="co-option${on ? ' selected' : ''}" data-co="${key}" data-v="${esc(o)}">${esc(o)}</button>`;
+  }).join('') + `</div>`;
+}
+
+function coGroup(title, inner){
+  return inner ? `<div class="co-group"><div class="co-group-title">${title}</div>${inner}</div>` : '';
 }
 
 function openCheckoutForm(){
   inquiryItem = null; // вход из корзины — оформляем именно корзину, а не заявку
   if(!cartIds().length) return;
+  coDraft = null;     // новое оформление — чистый черновик
   renderCheckoutForm();
   // Корзину закрываем: две шторки одновременно накладывались друг на друга —
   // форма заказа открывалась поверх, а корзина продолжала просвечивать сзади.
@@ -1665,27 +1712,43 @@ function openCheckoutForm(){
 
 function renderCheckoutForm(){
   const c = settings.checkout;
+  if(!coDraft) coDraft = freshDraft();
   const hasDelivery = (c.deliveryMethods||[]).length > 0;
-  document.getElementById('checkoutBody').innerHTML = `
-    <div class="sheet-title">Оформление заказа</div>
-    ${c.askName ? `<div class="field"><label>Имя</label><input id="coName" value="${esc(user.first_name||'')}"></div>` : ''}
-    ${c.askPhone ? `<div class="field"><label>Телефон${c.phoneRequired?' *':''}</label><input id="coPhone" type="tel" inputmode="tel" placeholder="+7..."></div>` : ''}
-    ${c.askContact ? `<div class="field"><label>Ссылка на вас</label><input id="coContact" placeholder="https://t.me/..."></div>` : ''}
-    ${c.askEmail ? `<div class="field"><label>Email</label><input id="coEmail" type="email" inputmode="email" placeholder="mail@example.com"></div>` : ''}
-    ${(c.paymentMethods||[]).length ? selectField('coPayment','Оплата', c.paymentMethods) : ''}
-    ${hasDelivery ? selectField('coDelivery','Доставка', c.deliveryMethods) : ''}
-    ${hasDelivery && c.askAddress ? `<div class="field"><label>Адрес доставки</label><textarea id="coAddress" placeholder="Город, улица, дом, квартира"></textarea></div>` : ''}
-    ${c.askComment ? `<div class="field"><label>Комментарий</label><textarea id="coComment" placeholder="Пожелания к заказу"></textarea></div>` : ''}
-    ${settings.promo && settings.promo.enabled ? `
+
+  const contacts = [
+    c.askName ? coField('Имя', `<input id="coName" value="${esc(coDraft.name)}" placeholder="Как к вам обращаться" autocomplete="name">`) : '',
+    c.askPhone ? coField(`Телефон${c.phoneRequired ? ' *' : ''}`, `<input id="coPhone" type="tel" inputmode="tel" placeholder="+7 900 123-45-67" value="${esc(coDraft.phone)}" autocomplete="tel">`) : '',
+    c.askEmail ? coField('Email', `<input id="coEmail" type="email" inputmode="email" placeholder="mail@example.com" value="${esc(coDraft.email)}" autocomplete="email">`) : '',
+  ].join('');
+
+  const delivery = [
+    hasDelivery ? coField('Способ доставки', coOptions('delivery', c.deliveryMethods, coDraft.delivery)) : '',
+    hasDelivery && c.askAddress ? coField('Адрес доставки', `<textarea id="coAddress" placeholder="Город, улица, дом, квартира">${esc(coDraft.address)}</textarea>`) : '',
+  ].join('');
+
+  const payment = (c.paymentMethods||[]).length
+    ? coField('Способ оплаты', coOptions('payment', c.paymentMethods, coDraft.payment)) : '';
+
+  const details = [
+    c.askComment ? coField('Комментарий', `<textarea id="coComment" placeholder="Пожелания к заказу">${esc(coDraft.comment)}</textarea>`) : '',
+    settings.promo && settings.promo.enabled ? `
       <div class="field promo-field">
         <label>${esc(settings.promo.label || 'Промокод')}</label>
         <div class="promo-row">
-          <input id="coPromo" placeholder="Введите код" autocomplete="off" autocapitalize="characters" value="${esc(appliedPromo ? appliedPromo.code : '')}">
+          <input id="coPromo" placeholder="Введите код" autocomplete="off" autocapitalize="characters" value="${esc(coDraft.promo)}">
           <button type="button" class="secondary-btn promo-apply" id="coPromoBtn">${appliedPromo ? 'Убрать' : 'Применить'}</button>
         </div>
         <div class="promo-msg" id="coPromoMsg">${appliedPromo ? `Скидка ${esc(appliedPromo.label)} — минус ${fmt(appliedPromo.discount)}` : ''}</div>
-      </div>` : ''}
-    ${c.requireAgreement ? `<label class="check-row"><input type="checkbox" id="coAgree"><span>${esc(c.agreementText)}</span></label>` : ''}
+      </div>` : '',
+    c.requireAgreement ? `<label class="check-row"><input type="checkbox" id="coAgree" ${coDraft.agree ? 'checked' : ''}><span>${esc(c.agreementText)}</span></label>` : '',
+  ].join('');
+
+  document.getElementById('checkoutBody').innerHTML = `
+    <div class="sheet-title">Оформление заказа</div>
+    ${coGroup('Контакты', contacts)}
+    ${coGroup('Доставка', delivery)}
+    ${coGroup('Оплата', payment)}
+    ${coGroup('Детали', details)}
     ${appliedPromo ? `<div class="cart-total" style="border:none;padding:0 4px 6px;font-size:calc(14px * var(--fs))"><span style="color:var(--muted)">Сумма</span><span style="color:var(--muted)">${fmt(orderTotal())}</span></div>` : ''}
     <div class="cart-total" style="border:none;padding-top:0"><span>К оплате</span><span>${settings.commerce.priceHidden ? '—' : fmt(payableTotal())}</span></div>
     <button class="checkout-btn" id="coSubmitBtn">Подтвердить заказ</button>
@@ -1694,6 +1757,29 @@ function renderCheckoutForm(){
   const promoBtn = document.getElementById('coPromoBtn');
   if(promoBtn) promoBtn.onclick = togglePromo;
 }
+
+// Делегирование событий формы на контейнере: обработчики не переподписываются
+// после каждой перерисовки (переключатели, ввод, галочка согласия).
+document.getElementById('checkoutBody').addEventListener('click', e => {
+  const opt = e.target.closest('.co-option');
+  if(!opt || !coDraft) return;
+  coDraft[opt.dataset.co] = opt.dataset.v;
+  haptic.tap();
+  renderCheckoutForm();
+});
+document.getElementById('checkoutBody').addEventListener('input', e => {
+  if(!coDraft) return;
+  const map = { coName:'name', coPhone:'phone', coEmail:'email', coAddress:'address', coComment:'comment', coPromo:'promo' };
+  const k = map[e.target.id];
+  if(!k) return;
+  coDraft[k] = e.target.value;
+  // ошибка снимается сразу, как только поле начали исправлять
+  const fld = e.target.closest('.field');
+  if(fld && fld.classList.contains('invalid')) fld.classList.remove('invalid');
+});
+document.getElementById('checkoutBody').addEventListener('change', e => {
+  if(coDraft && e.target.id === 'coAgree') coDraft.agree = e.target.checked;
+});
 
 // --- промокод ---
 // Скидку считает сервер и только он: на клиенте её было бы тривиально подделать,
@@ -1739,18 +1825,39 @@ async function togglePromo(){
   }
 }
 
+function setFieldError(id, msg){
+  const el = document.getElementById(id);
+  if(!el) return;
+  const fld = el.closest('.field');
+  fld.classList.add('invalid');
+  fld.querySelector('.field-error').textContent = msg;
+}
+
 async function submitOrder(){
   const c = settings.checkout;
   const btn = document.getElementById('coSubmitBtn');
-  const val = id => document.getElementById(id)?.value?.trim() || '';
+  const d = coDraft || freshDraft();
 
-  // валидация до отправки — молча падать на сервере плохой UX
-  if(c.askPhone && c.phoneRequired && val('coPhone').replace(/\D/g,'').length < 10){
-    haptic.err(); showToast('Укажите телефон', true);
-    document.getElementById('coPhone')?.focus();
+  // валидация до отправки: подсвечиваем конкретное поле и пишем, что не так
+  if(c.askPhone){
+    const digits = d.phone.replace(/\D/g, '');
+    if(c.phoneRequired && digits.length < 10){
+      haptic.err(); setFieldError('coPhone', 'Укажите номер полностью — минимум 10 цифр');
+      document.getElementById('coPhone')?.focus();
+      return;
+    }
+    if(!c.phoneRequired && digits && digits.length < 10){
+      haptic.err(); setFieldError('coPhone', 'Номер выглядит неполным — проверьте цифры');
+      document.getElementById('coPhone')?.focus();
+      return;
+    }
+  }
+  if(c.askEmail && d.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email.trim())){
+    haptic.err(); setFieldError('coEmail', 'Проверьте адрес почты — например, mail@example.com');
+    document.getElementById('coEmail')?.focus();
     return;
   }
-  if(c.requireAgreement && !document.getElementById('coAgree')?.checked){
+  if(c.requireAgreement && !d.agree){
     haptic.err(); showToast('Нужно согласие на обработку данных', true); return;
   }
 
@@ -1758,11 +1865,16 @@ async function submitOrder(){
   btn.textContent = 'Отправляем…';
 
   const items = orderItems(); // корзина либо один товар-заявка
+  // Состав для экрана успеха снимаем до очистки корзины
+  const summary = items.map(i => {
+    const p = products.find(x => x.id === Number(i.id));
+    return p ? { name: p.name, qty: i.qty, sum: p.price * i.qty } : null;
+  }).filter(Boolean);
   const customer = {
-    name: val('coName') || user.first_name || 'Без имени',
-    phone: val('coPhone'), contact: val('coContact'), email: val('coEmail'),
-    payment: val('coPayment'), delivery: val('coDelivery'),
-    address: val('coAddress'), comment: val('coComment'),
+    name: d.name.trim() || user.first_name || 'Без имени',
+    phone: d.phone.trim(), email: d.email.trim(),
+    payment: d.payment, delivery: d.delivery,
+    address: d.address.trim(), comment: d.comment.trim(),
   };
 
   try{
@@ -1776,7 +1888,7 @@ async function submitOrder(){
     const data = await res.json();
     if(!res.ok || !data.ok) throw new Error(data.error || 'Не удалось отправить заказ');
     haptic.ok();
-    showCheckoutSuccess(data.orderText, data.orderId);
+    showCheckoutSuccess(data, summary);
     // заявка по одному товару корзину не трогает — чистим только то, что отправили
     if(inquiryItem) inquiryItem = null; else cart.clear();
     appliedPromo = null; // код израсходован, на следующий заказ не переносится
@@ -1790,26 +1902,36 @@ async function submitOrder(){
   }
 }
 
-function showCheckoutSuccess(orderText, orderId){
+// Экран успеха только для покупателя: номер, состав и сумма заказа, следующий
+// шаг. Служебная карточка заказа (buildOrderText) уходит исключительно
+// менеджеру — здесь она не показывается, доступна лишь через «Скопировать».
+function showCheckoutSuccess(data, summary){
   const c = settings.checkout;
   const pay = settings.payments || {};
+  const rows = summary.map(i =>
+    `<div class="co-row"><span>${esc(i.name)} × ${i.qty}</span><span>${fmt(i.sum)}</span></div>`).join('');
+  const total = data.total != null ? data.total : payableTotal();
   document.getElementById('checkoutBody').innerHTML = `
-    <div class="sheet-title">${esc(c.successTitle)}</div>
-    <div style="font-size:calc(14px * var(--fs));color:var(--muted);line-height:1.6;margin-bottom:16px;white-space:pre-line">${esc(c.successText)}</div>
-    ${orderText ? `<pre class="order-receipt">${esc(orderText)}</pre>` : ''}
-    ${pay.enabled && orderId ? `<button class="checkout-btn" id="coPayBtn" style="margin-bottom:10px">${esc(pay.buttonText || 'Оплатить онлайн')}</button>` : ''}
-    <button class="${pay.enabled && orderId ? 'secondary-btn' : 'checkout-btn'}" id="coCopyBtn" style="margin-bottom:10px">Скопировать заказ</button>
-    ${settings.manager.buyUrl ? `<button class="secondary-btn" id="coWriteBtn">Написать менеджеру</button>` : ''}
-    <button class="secondary-btn" id="coDoneBtn">Готово</button>
+    <div class="co-success">
+      <div class="co-check" aria-hidden="true"><svg viewBox="0 0 52 52" fill="none"><path d="M14 27l8 8 16-17" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <div class="sheet-title">${esc(c.successTitle)}</div>
+      <div class="co-orderno">Заказ № ${esc(String(data.orderId))}</div>
+      ${rows ? `<div class="co-summary">${rows}<div class="co-row co-total-row"><span>К оплате</span><span>${settings.commerce.priceHidden ? '—' : fmt(total)}</span></div></div>` : ''}
+      <div class="co-next">${esc(c.successText)}</div>
+      ${pay.enabled && data.orderId ? `<button class="checkout-btn" id="coPayBtn" style="margin-bottom:10px">${esc(pay.buttonText || 'Оплатить онлайн')}</button>` : ''}
+      <button class="${pay.enabled && data.orderId ? 'secondary-btn' : 'checkout-btn'}" id="coDoneBtn" style="margin-bottom:10px">Вернуться в магазин</button>
+      ${settings.manager.buyUrl ? `<button class="secondary-btn" id="coWriteBtn" style="margin-bottom:10px">Написать менеджеру</button>` : ''}
+      <button class="secondary-btn co-copy" id="coCopyBtn">Скопировать заказ</button>
+    </div>
   `;
   const payBtn = document.getElementById('coPayBtn');
-  if(payBtn) payBtn.onclick = () => startPayment(orderId, payBtn);
-  document.getElementById('coCopyBtn').onclick = () => {
-    navigator.clipboard?.writeText(orderText).then(()=> { haptic.ok(); showToast('Скопировано'); }).catch(()=>{});
-  };
-  const w = document.getElementById('coWriteBtn');
-  if(w) w.onclick = () => openBuyLink(settings.manager.buyUrl, orderText);
+  if(payBtn) payBtn.onclick = () => startPayment(data.orderId, payBtn);
   document.getElementById('coDoneBtn').onclick = () => closeSheet('checkoutOverlay');
+  const w = document.getElementById('coWriteBtn');
+  if(w) w.onclick = () => openBuyLink(settings.manager.buyUrl, data.orderText);
+  document.getElementById('coCopyBtn').onclick = () => {
+    navigator.clipboard?.writeText(data.orderText).then(()=> { haptic.ok(); showToast('Скопировано'); }).catch(()=>{});
+  };
 }
 
 // Онлайн-оплата: сервер сам считает сумму по сохранённому заказу и возвращает

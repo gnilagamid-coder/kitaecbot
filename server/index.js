@@ -8,6 +8,8 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
+const os = require('node:os');
+const { execFile } = require('node:child_process');
 
 // Мини-загрузчик .env — чтобы `node server/index.js` работал и без systemd,
 // который в проде подставляет переменные сам через EnvironmentFile.
@@ -104,6 +106,121 @@ function rateLimit(ip, max, windowMs) {
 setInterval(() => { const now = Date.now(); for (const [k, v] of hits) if (now - v.start > 600000) hits.delete(k); }, 600000).unref();
 
 function getSettings() { return sanitize(store.read('settings', {})); }
+
+// ---------- состояние VPS (карточка «Сервер» в админке) ----------
+// Всё читается из ядра/proc без внешних зависимостей; «тяжёлые» вызовы
+// (df, nvidia-smi) кэшируются на минуту, а общий ответ — на 30 секунд,
+// так что даже частые обновления из админки серверу почти ничего не стоят.
+const SYS_TTL_MS = 30 * 1000;
+const SLOW_TTL_MS = 60 * 1000;
+
+let sysCache = { at: 0, data: null };
+let diskCache = { at: 0, done: false, value: null };
+let gpuCache = { at: 0, value: null };
+let gpuAbsent = false;
+let cpuPrev = { at: 0, total: 0, idle: 0 };
+let cpuLast = 0;
+
+function cpuTotals() {
+  let total = 0, idle = 0;
+  for (const c of os.cpus()) {
+    for (const k in c.times) total += c.times[k];
+    idle += c.times.idle;
+  }
+  return { at: Date.now(), total, idle };
+}
+
+// Процент загрузки CPU — дельта между двумя снимками os.cpus(). Первый
+// снимок берём при старте процесса, чтобы уже первый запрос показывал
+// реальную загрузку, а не ноль.
+cpuPrev = cpuTotals();
+function cpuPercent() {
+  const cur = cpuTotals();
+  if (cur.at - cpuPrev.at >= 2000) {
+    const dt = cur.total - cpuPrev.total;
+    const di = cur.idle - cpuPrev.idle;
+    if (dt > 0) cpuLast = Math.round(100 * (1 - di / dt));
+    cpuPrev = cur;
+  }
+  return cpuLast;
+}
+
+// os.freemem() отдаёт «чистый» MemFree, без кэш-буферов ядра, и память
+// выглядела бы занятой почти целиком. MemAvailable из /proc/meminfo —
+// честная цифра: сколько реально можно выделить.
+function memInfo() {
+  const total = os.totalmem();
+  try {
+    const raw = fs.readFileSync('/proc/meminfo', 'utf8');
+    const m = /MemAvailable:\s+(\d+)\s*kB/.exec(raw);
+    if (m) return { total, free: Number(m[1]) * 1024 };
+  } catch (e) { /* не Linux — fallback ниже */ }
+  return { total, free: os.freemem() };
+}
+
+function diskInfo() {
+  return new Promise(resolve => {
+    if (process.platform !== 'linux') return resolve(null);
+    execFile('df', ['-Pk', '/'], { timeout: 3000 }, (err, out) => {
+      if (err) return resolve(null);
+      const parts = (String(out).split('\n')[1] || '').trim().split(/\s+/);
+      const total = Number(parts[1]) * 1024;
+      const free = Number(parts[3]) * 1024;
+      if (!total || Number.isNaN(free)) return resolve(null);
+      resolve({ total, used: total - free });
+    });
+  });
+}
+
+function gpuInfo() {
+  return new Promise(resolve => {
+    execFile('nvidia-smi', [
+      '--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu',
+      '--format=csv,noheader,nounits',
+    ], { timeout: 4000 }, (err, out) => {
+      if (err) { gpuAbsent = true; return resolve(null); }
+      const parts = (String(out).split('\n')[0] || '').split(',').map(x => x.trim());
+      if (parts.length < 5 || parts[0] === '[N/A]') { gpuAbsent = true; return resolve(null); }
+      resolve({
+        name: parts[0],
+        util: Number(parts[1]) || 0,
+        memUsed: (Number(parts[2]) || 0) * 1048576,
+        memTotal: (Number(parts[3]) || 0) * 1048576,
+        temp: Number(parts[4]) || 0,
+      });
+    });
+  });
+}
+
+async function systemStatus() {
+  const now = Date.now();
+  if (sysCache.data && now - sysCache.at < SYS_TTL_MS) return sysCache.data;
+
+  const mem = memInfo();
+  if (!diskCache.done || now - diskCache.at > SLOW_TTL_MS) {
+    diskCache = { at: now, done: true, value: await diskInfo() };
+  }
+  // GPU без драйвера nvidia: опрашиваем один раз и запоминаем, что его нет,
+  // чтобы не дёргать отсутствующую утилиту на каждый запрос.
+  if (!gpuAbsent && now - gpuCache.at > SLOW_TTL_MS) {
+    gpuCache = { at: now, value: await gpuInfo() };
+  }
+
+  const data = {
+    platform: process.platform,
+    hostUptime: Math.floor(os.uptime()),
+    processUptime: Math.floor(process.uptime()),
+    cores: os.cpus().length,
+    cpu: cpuPercent(),
+    load: os.loadavg().map(x => Number(x.toFixed(2))),
+    mem: { total: mem.total, used: mem.total - mem.free },
+    rss: process.memoryUsage().rss,
+    disk: diskCache.value,
+    gpu: gpuCache.value,
+  };
+  sysCache = { at: now, data };
+  return data;
+}
 
 // Короткий отпечаток текущих настроек — им помечается отдаваемый index.html,
 // чтобы кэш клиента протухал ровно тогда, когда продавец что-то поменял.
@@ -306,7 +423,6 @@ function buildOrderText(s, items, c, tgUser, promo, finalTotal) {
   L.push('');
   L.push(`👤 Клиент: ${esc(c.name || (tgUser && tgUser.first_name) || 'Без имени')}`);
   if (c.phone) L.push(`📱 Телефон: ${esc(c.phone)}`);
-  if (c.contact) L.push(`🔗 Профиль: ${esc(c.contact)}`);
   if (c.email) L.push(`✉️ Email: ${esc(c.email)}`);
   if (c.address) L.push(`📍 Адрес: ${esc(c.address)}`);
   if (c.delivery) L.push(`🚚 Доставка: ${esc(c.delivery)}`);
@@ -489,13 +605,30 @@ async function handleApi(req, res, url) {
     if (changed) store.write('products', products);
 
     if (s.notify.enabled && s.notify.onOrder) {
-      await bot.notifyManagers(s, text).catch(() => {});
+      // Ошибки доставки логирует сам notifyManagers ([notify] ...)
+      await bot.notifyManagers(s, text).catch(e => console.error('[checkout] notifyManagers:', e.message));
     }
     // копия покупателю в чат с ботом
     if (s.bot.notifyCustomer && tgUser) {
+      // Покупателю — только подтверждение и статус: переменную {order}
+      // (служебная выгрузка для менеджера) из шаблона вырезаем — она могла
+      // остаться в старых настройках. {name} оставляем.
+      // LF собираем через fromCharCode, переносы схлопываем без regex-эскейпов
+      const LF = String.fromCharCode(10);
+      const receiptTpl = String(s.bot.customerReceiptText || '')
+        .split('{order}').join('')
+        .split(LF + LF + LF).join(LF + LF)
+        .split(LF + LF + LF).join(LF + LF)
+        .trim();
       const payload = {
         chat_id: tgUser.id,
-        text: bot.fill(s.bot.customerReceiptText, { order: built.text.replace(/<[^>]+>/g, ''), name: esc(tgUser.first_name || '') }),
+        // {id} и {total} — номер и сумма именно этого заказа; {order}
+        // (менеджерская выгрузка) выше вырезан из шаблона намеренно.
+        text: bot.fill(receiptTpl, {
+          name: esc(tgUser.first_name || ''),
+          id: String(order.id),
+          total: money(finalTotal, s),
+        }),
         parse_mode: 'HTML',
       };
       // Кнопка открытия магазина в чеке — строго web_app (приватный чат,
@@ -503,10 +636,22 @@ async function handleApi(req, res, url) {
       // «магазин открывается огромным окном браузера» без обвязки Mini App.
       const appUrl = bot.shopWebAppUrl(s);
       if (appUrl) payload.reply_markup = { inline_keyboard: [[{ text: s.bot.buttonText, web_app: { url: appUrl } }]] };
-      await tgApi('sendMessage', payload).catch(() => {});
+      const receipt = await tgApi('sendMessage', payload).catch(() => null);
+      if (!receipt || !receipt.ok) {
+        const why = (receipt && receipt.description) || 'нет связи с Telegram API';
+        if (/blocked|forbidden|user is deactivated/i.test(why)) {
+          // Самая частая причина: бот не может первым написать пользователю,
+          // который ни разу не нажал /start (мини-апп открыт ссылкой, не чатом)
+          console.warn(`[checkout] подтверждение покупателю ${tgUser.id} не доставлено: ${why} — покупатель не запускал бота или заблокировал его`);
+        } else {
+          console.error(`[checkout] подтверждение покупателю ${tgUser.id} не доставлено: ${why}`);
+        }
+      }
     }
 
-    return json(res, 200, { ok: true, orderId: order.id, orderText: built.text.replace(/<[^>]+>/g, '') });
+    // total — пересчитанная сервером сумма (с промокодом): экран успеха
+    // показывает именно её, а не сумму, насчитанную клиентом.
+    return json(res, 200, { ok: true, orderId: order.id, total: finalTotal, orderText: built.text.replace(/<[^>]+>/g, '') });
   }
 
   // Создание платежа по уже оформленному заказу. Сумму берём из сохранённого
@@ -683,6 +828,11 @@ async function handleApi(req, res, url) {
         users: Object.keys(store.read('users', {})).length,
         botConnected: !!BOT_TOKEN,
       });
+    }
+
+    // Состояние VPS для карточки «Сервер» в админке (за токеном, наружу нельзя)
+    if (p === '/api/admin/system' && method === 'GET') {
+      return json(res, 200, await systemStatus());
     }
 
     // Самодиагностика: показывает продавцу, что именно сломано, вместо того
