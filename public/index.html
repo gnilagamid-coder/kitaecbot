@@ -389,9 +389,9 @@
   }
   .lightbox[hidden]{display:none}
   @keyframes lbIn{from{opacity:0}to{opacity:1}}
-  /* pinch-zoom отдаём браузеру: свой жест никогда не будет таким же плавным,
-     как нативный, а на iOS ещё и конфликтует с системным зумом */
-  .lightbox-stage{width:100%;height:100%;overflow:auto;touch-action:pinch-zoom;display:flex;align-items:center;justify-content:center}
+  /* Зум двумя пальцами убран: touch-action:none не даёт браузеру масштабировать
+     и тягать фото — картинка всегда вписана в экран целиком */
+  .lightbox-stage{width:100%;height:100%;overflow:hidden;touch-action:none;display:flex;align-items:center;justify-content:center}
   .lightbox-stage img{max-width:100%;max-height:100%;object-fit:contain;display:block}
   .lightbox-close{
     position:absolute;top:calc(12px + var(--safe-top));right:12px;z-index:2;
@@ -399,11 +399,7 @@
     display:flex;align-items:center;justify-content:center;border-radius:var(--radius);
   }
   .lightbox-close svg{width:18px;height:18px}
-  .lightbox-hint{
-    position:absolute;bottom:calc(20px + var(--safe-bottom));left:50%;transform:translateX(-50%);
-    color:rgba(255,255,255,.5);font-size:12px;pointer-events:none;
-  }
-
+  
   .toast{
     position:fixed;left:50%;bottom:calc(90px + var(--safe-bottom));transform:translate(-50%,10px);
     background:var(--surface-2);color:var(--text);border:var(--bw) solid var(--accent);
@@ -704,13 +700,12 @@
   </div>
 </div>
 
-<!-- полноэкранный просмотр фото: pinch-zoom отдан браузеру через touch-action -->
+<!-- полноэкранный просмотр фото: без зума, картинка всегда вписана в экран -->
 <div class="lightbox" id="lightbox" hidden>
   <button class="lightbox-close" id="lightboxClose" aria-label="Закрыть">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
   </button>
   <div class="lightbox-stage" id="lightboxStage"><img id="lightboxImg" alt=""></div>
-  <div class="lightbox-hint">Двумя пальцами — приблизить</div>
 </div>
 
 <button class="fab-cart" id="cartBtn" aria-label="Корзина">
@@ -1122,8 +1117,8 @@ let swipeState = null;
 let swipeAttached = false;
 let gestureMoved = false; // была ли протяжка — чтобы свайп не считался тапом
 
-// Полноэкранный просмотр. Масштабирование делает сам браузер (touch-action:
-// pinch-zoom) — это плавнее и привычнее любой самописной реализации.
+// Полноэкранный просмотр. Зум двумя пальцами отключён (touch-action:none на
+// сцене) — фото всегда вписано в экран целиком.
 function openLightbox(index){
   const box = document.getElementById('lightbox');
   document.getElementById('lightboxImg').src = galleryUrls[index] || '';
