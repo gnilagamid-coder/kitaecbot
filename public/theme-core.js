@@ -74,6 +74,16 @@ const THEME_PRESETS = {
     text: '#16191c', muted: '#6b7280', accent: '#007782', accent2: '#0f172a',
     radius: 14, borderWidth: 0, fontDisplay: 'Inter', uppercase: false,
   },
+  // Вдохновлено travel-сайтом eightour.com: почти чёрный холст с фиолетовым
+  // подтоном, орхидейные приглушённые подписи, сочный фиолетовый акцент.
+  // Адаптировано под нашу систему: шрифты и знаки свои (Trajan лицензионный),
+  // контраст текста к фону и приглушённого текста не хуже WCAG AA.
+  voyage: {
+    label: 'Вояж',
+    bg: '#0a0412', surface: '#140a1f', surface2: '#241236',
+    text: '#f2f2f2', muted: '#b98acb', accent: '#9e4ed3', accent2: '#9e9eff',
+    radius: 0, borderWidth: 1, fontDisplay: 'Space Grotesk', uppercase: true,
+  },
 };
 
 // Готовые фирменные знаки — альтернатива эмодзи для тех, кому нужен свой логотип,

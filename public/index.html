@@ -289,28 +289,6 @@
   }
   .menu-item:last-child{border-bottom:none}
   .menu-item span{color:var(--muted)}
-  
-    /* выбор темы оформления в профиле. Явное переключение покупателем —
-       не зависит ни от системной темы, ни от автоопределения Telegram. */
-    .profile-section-label{
-      font-family:var(--font-display);font-size:calc(11px * var(--fs));font-weight:600;
-      letter-spacing:.6px;text-transform:var(--caps);color:var(--muted);
-      text-align:left;margin:18px 0 8px;
-    }
-    .theme-picker{display:flex;gap:8px}
-    .theme-opt{
-      flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;
-      background:var(--surface);border:var(--bw) solid var(--surface-2);border-radius:var(--radius);
-      padding:9px 4px 8px;
-      font-family:var(--font-display);font-size:calc(11px * var(--fs));font-weight:600;
-      letter-spacing:.4px;text-transform:var(--caps);color:var(--muted);
-      transition:border-color .15s,color .15s;
-    }
-    .theme-opt i{
-      width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;
-      font-style:normal;font-weight:700;font-size:14px;border:1px solid rgba(128,128,128,.4);
-    }
-    .theme-opt.active{border-color:var(--accent);color:var(--text)}
 
   /* lists */
   .fav-list{display:flex;flex-direction:column;gap:10px}
@@ -825,28 +803,10 @@ const LS_THEME = 'shop_theme_v2';
 function cacheTheme(theme, brand){
   try{ localStorage.setItem(LS_THEME, JSON.stringify({ theme, brand })); }catch(e){}
 }
-
-// Темы оформления, которые покупатель выбирает САМ в профиле. Это оверлей
-// поверх палитры продавца (и поверх авторежима «подстроиться под Telegram»):
-// явный выбор всегда побеждает автоопределение. Перекрашиваются только
-// нейтральные цвета — акцент, шрифты и скругления бренда остаются.
-// Все палитры выдерживают контраст текста к фону не хуже WCAG AA.
-const LS_USER_THEME = 'shop_user_theme_v1';
-const USER_THEMES = {
-  shop:     { label:'Магазин', swatch:null, vars:null },
-  dark:     { label:'Тёмная',  swatch:{ bg:'#101014', fg:'#f2f1ea' },
-              vars:{ '--bg':'#101014','--surface':'#191920','--surface-2':'#24242e','--text':'#f2f1ea','--muted':'#9b99a0' }},
-  light:    { label:'Светлая', swatch:{ bg:'#f6f5f1', fg:'#191817' },
-              vars:{ '--bg':'#f6f5f1','--surface':'#ffffff','--surface-2':'#e9e7e0','--text':'#191817','--muted':'#6c6a63' }},
-  contrast: { label:'Контраст', swatch:{ bg:'#000000', fg:'#ffffff' },
-              vars:{ '--bg':'#000000','--surface':'#111111','--surface-2':'#1f1f1f','--text':'#ffffff','--muted':'#c4c4c4' }},
-};
-function getUserThemeChoice(){
-  try{ const v = localStorage.getItem(LS_USER_THEME); return USER_THEMES[v] ? v : 'shop'; }catch(e){ return 'shop'; }
-}
-function setUserThemeChoice(name){
-  try{ localStorage.setItem(LS_USER_THEME, name); }catch(e){}
-}
+// Выбор темы — глобальная настройка магазина (админка → Тема), персонального
+// переключателя у покупателя больше нет. Подчищаем кэш от старых версий,
+// где покупатель мог выбрать свою тему: она больше не должна применяться.
+try{ localStorage.removeItem('shop_user_theme_v1'); }catch(e){}
 (function applyBootTheme(){
   // Основной путь: сервер уже вписал переменные в <style id="bootTheme">, здесь
   // только доносим классы-модификаторы, которые живут на <body>.
@@ -872,20 +832,6 @@ function setUserThemeChoice(name){
     setIf('--accent-2', tp.link_color);
     setIf('--heart', tp.button_color);
     if(tp.button_color) st.setProperty('--on-accent', contrastOnColor(document.documentElement, tp.button_color));
-  }
-
-  // Выбор темы покупателем старше и палитры продавца, и темы Telegram —
-  // достаём его из кэша и кладём на первый кадр, чтобы не было перекраски
-  // после загрузки настроек. Стоит ДО return ниже: bootTheme есть всегда,
-  // когда страницу отдаёт сервер. В превью админки не трогаем: там продавец
-  // должен видеть ИМЕННО палитру магазина.
-  if(!new URLSearchParams(location.search).has('preview')){
-    const u = USER_THEMES[getUserThemeChoice()];
-    if(u && u.vars){
-      const st = document.documentElement.style;
-      Object.entries(u.vars).forEach(([k, v]) => st.setProperty(k, v));
-      st.colorScheme = getUserThemeChoice() === 'light' ? 'light' : 'dark';
-    }
   }
 
   // Запасной путь — для превью в админке и для случая, когда HTML пришёл
@@ -1998,25 +1944,7 @@ function renderProfileMenu(){
   if(settings?.manager.supportUrl){
     items.push({ label: 'Поддержка', onClick: () => openBuyLink(settings.manager.supportUrl) });
   }
-  // переключатель тем: явный выбор покупателя, хранится в localStorage
-  const cur = getUserThemeChoice();
-  const picker = `
-    <div class="profile-section-label">Тема оформления</div>
-    <div class="theme-picker" role="radiogroup" aria-label="Тема оформления">${
-      Object.entries(USER_THEMES).map(([key, t]) => `
-        <button type="button" class="theme-opt ${key === cur ? 'active' : ''}" data-ut="${key}" role="radio" aria-checked="${key === cur}">
-          <i style="background:${t.swatch ? t.swatch.bg : 'var(--accent)'};color:${t.swatch ? t.swatch.fg : 'var(--on-accent)'}">A</i>
-          <span>${t.label}</span>
-        </button>`).join('')
-    }</div>`;
-  menu.innerHTML = picker + items.map((it, i) => `<div class="menu-item" data-i="${i}"><span>${esc(it.label)}</span> ›</div>`).join('');
-  menu.querySelectorAll('.theme-opt').forEach(el => el.onclick = () => {
-    if(el.dataset.ut === getUserThemeChoice()) return;
-    haptic.tap();
-    setUserThemeChoice(el.dataset.ut);
-    applyUserTheme();
-    renderProfileMenu(); // перерисовать, чтобы подсветить выбранную
-  });
+  menu.innerHTML = items.map((it, i) => `<div class="menu-item" data-i="${i}"><span>${esc(it.label)}</span> ›</div>`).join('');
   menu.querySelectorAll('.menu-item').forEach((el, i) => { el.onclick = () => { haptic.tap(); items[i].onClick(); }; });
 }
 
@@ -2056,32 +1984,6 @@ function telegramThemeMix(t){
   if(tp.button_color) mix.accent = tp.button_color;
   if(tp.link_color) mix.accent2 = tp.link_color;
   return mix;
-}
-
-// Оверлей темы, выбранной покупателем в профиле. Зовётся в конце
-// applySettings — после палитры продавца и подмеса Telegram, поэтому
-// явный выбор всегда оказывается сверху. В превью админки не работает.
-function applyUserTheme(){
-  if(IS_PREVIEW || !settings) return;
-  const choice = getUserThemeChoice();
-  const u = USER_THEMES[choice];
-  const st = document.documentElement.style;
-  if(u && u.vars){
-    Object.entries(u.vars).forEach(([k, v]) => st.setProperty(k, v));
-  }else{
-    // «Магазин»: возвращаем палитру продавца (с учётом режима telegram).
-    // applyTheme, а не applySettings — иначе получили бы рекурсию.
-    applyTheme(Object.assign({}, settings.theme, telegramThemeMix(settings.theme) || {}));
-  }
-  st.colorScheme = choice === 'light' ? 'light'
-    : choice === 'shop' ? (tg?.colorScheme || 'dark') : 'dark';
-
-  // нативные цвета оболочки Telegram — за выбранным фоном
-  const bgHex = themeHex('--bg');
-  try{
-    if(tg?.setHeaderColor) tg.setHeaderColor(tg.isVersionAtLeast?.('6.9') && bgHex ? bgHex : 'bg_color');
-    if(tg?.setBackgroundColor && bgHex) tg.setBackgroundColor(bgHex);
-  }catch(e){}
 }
 
 function applySettings(s){
@@ -2159,9 +2061,6 @@ function applySettings(s){
   // цвета нативной MainButton берутся из темы — после перекраски их надо
   // пересинхронизировать, иначе кнопка останется в прошлой палитре
   syncMainButton();
-
-  // последним идёт выбор темы покупателем — он перекрывает всё остальное
-  applyUserTheme();
 }
 
 async function loadSettings(){

@@ -20,7 +20,7 @@ const DEFAULTS = {
 
   // --- тема оформления ---
   theme: {
-    preset: 'brutalist',    // см. THEME_PRESETS в public/shared.js
+    preset: 'brutalist',    // см. THEME_PRESETS в public/theme-core.js
     colorScheme: 'dark',    // dark | light | telegram (следовать теме клиента)
     bg: '', surface: '', surface2: '', text: '', muted: '', accent: '', accent2: '',
     radius: 0,              // px
