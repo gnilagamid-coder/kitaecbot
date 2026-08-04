@@ -636,7 +636,9 @@ async function handleApi(req, res, url) {
       // «магазин открывается огромным окном браузера» без обвязки Mini App.
       const appUrl = bot.shopWebAppUrl(s);
       if (appUrl) payload.reply_markup = { inline_keyboard: [[{ text: s.bot.buttonText, web_app: { url: appUrl } }]] };
-      const receipt = await tgApi('sendMessage', payload).catch(() => null);
+      // Если web_app-кнопка отклоняется (домен не привязан в BotFather),
+      // sendWithFallback сам повторит без неё и залогировает причину.
+      const receipt = await bot.sendWithFallback(payload, `чек покупателю ${tgUser.id}`).catch(() => null);
       if (!receipt || !receipt.ok) {
         const why = (receipt && receipt.description) || 'нет связи с Telegram API';
         if (/blocked|forbidden|user is deactivated/i.test(why)) {

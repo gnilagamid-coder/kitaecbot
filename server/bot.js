@@ -25,7 +25,9 @@ function fill(tpl, vars) {
 // откатится на открытие в браузере. t.me-ссылка от этого не страдает.
 function shopWebAppUrl(s) {
   const link = String(s.channel.miniAppLink || '').trim();
-  if (/^https:\/\/(t\.me|telegram\.me)\//i.test(link)) return link;
+  // Прямая ссылка мини-аппа — это https://t.me/<бот>/<appname>; голая ссылка
+  // на бота мини-аппом не является и в web_app не принимается.
+  if (/^https:\/\/(t\.me|telegram\.me)\/[A-Za-z0-9_]+\/[A-Za-z0-9_]+/i.test(link)) return link;
   const pub = String(process.env.PUBLIC_URL || '').trim().replace(/\/$/, '');
   if (/^https:\/\//i.test(pub)) return pub;
   return '';
@@ -71,6 +73,24 @@ function normalize(v) {
   return t;
 }
 
+// Отправка с аварийным отстёгиванием клавиатуры. Самая частая причина 400 на
+// sendMessage с web_app-кнопкой — домен не привязан к боту в @BotFather
+// (/setdomain): Telegram отклоняет ВЕСЬ message целиком, и получатель не
+// видит ничего. Текст важнее кнопки: при отказе шлём сообщение без неё.
+async function sendWithFallback(payload, label) {
+  const res = await tgApi('sendMessage', payload);
+  if (res.ok) return res;
+  console.error(`[bot] ${label} не отправлено: ${res.description}`);
+  if (!payload.reply_markup) return res;
+  const retry = await tgApi('sendMessage', { ...payload, reply_markup: undefined });
+  if (retry.ok) {
+    console.warn(`[bot] ${label} доставлено без кнопки магазина — привяжите домен в @BotFather (/setdomain) или впишите прямую ссылку мини-аппа t.me/бот/app в настройках`);
+    return retry;
+  }
+  console.error(`[bot] ${label} без кнопки тоже не ушло: ${retry.description}`);
+  return retry;
+}
+
 async function handleUpdate(update) {
   const msg = update.message || update.edited_message;
   if (!msg || !msg.chat) return;
@@ -94,32 +114,32 @@ async function handleUpdate(update) {
   }
 
   if (text === '/start' || text.startsWith('/start ')) {
-    await tgApi('sendMessage', {
+    await sendWithFallback({
       chat_id: chatId,
       text: fill(s.bot.welcomeText, { name, shop: esc(s.brand.shopName) }),
       parse_mode: 'HTML',
       reply_markup: menuKeyboard(s, chatId),
-    });
+    }, 'приветствие');
     return;
   }
 
   if (text === '/help' || text === '/support') {
-    await tgApi('sendMessage', {
+    await sendWithFallback({
       chat_id: chatId,
       text: fill(s.bot.helpText, { name, shop: esc(s.brand.shopName) }),
       parse_mode: 'HTML',
       reply_markup: menuKeyboard(s, chatId),
-    });
+    }, 'ответ на /help');
     return;
   }
 
   if (text === '/shop' || text === '/menu' || text === '/catalog') {
-    await tgApi('sendMessage', {
+    await sendWithFallback({
       chat_id: chatId,
       text: `🛍 ${esc(s.brand.shopName)}`,
       parse_mode: 'HTML',
       reply_markup: menuKeyboard(s, chatId),
-    });
+    }, 'каталог');
     return;
   }
 
@@ -149,11 +169,8 @@ async function notifyManagers(s, text) {
     if (appUrl && Number(id) > 0) {
       payload.reply_markup = { inline_keyboard: [[{ text: s.bot.buttonText, web_app: { url: appUrl } }]] };
     }
-    const res = await tgApi('sendMessage', payload);
-    if (!res.ok) {
-      failed++;
-      console.error(`[notify] менеджеру ${id} не доставлено: ${res.description}`);
-    }
+    const res = await sendWithFallback(payload, `уведомление менеджеру ${id}`);
+    if (!res.ok) failed++;
   }
   return failed === 0;
 }
@@ -297,4 +314,4 @@ async function start() {
 
 function stop() { running = false; }
 
-module.exports = { start, stop, notifyManagers, fill, normalize, handleUpdate, webhookSecret, shopWebAppUrl };
+module.exports = { start, stop, notifyManagers, fill, normalize, handleUpdate, webhookSecret, shopWebAppUrl, sendWithFallback };
