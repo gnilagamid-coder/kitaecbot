@@ -312,7 +312,9 @@
   .fav-remove{width:44px;height:44px;background:var(--surface);display:flex;align-items:center;justify-content:center;flex-shrink:0;border-radius:var(--radius)}
   .fav-remove svg{width:14px;height:14px;color:var(--muted)}
   .empty{text-align:center;color:var(--muted);font-size:calc(13px * var(--fs));padding:40px 16px;line-height:1.6;white-space:pre-line}
-  .empty-action{margin-top:16px;display:inline-block;padding:12px 22px;background:var(--accent);color:var(--on-accent);font-family:var(--font-display);text-transform:var(--caps);font-size:calc(13px * var(--fs));border-radius:var(--radius)}
+  /* кнопка в пустых состояниях — отдельной строкой под текстом: inline-block
+     затекал в последнюю строку текста («…добавить его сюда. [КНОПКА]») */
+  .empty-action{display:block;width:max-content;margin:16px auto 0;padding:12px 22px;background:var(--accent);color:var(--on-accent);font-family:var(--font-display);text-transform:var(--caps);font-size:calc(13px * var(--fs));border-radius:var(--radius)}
 
   /* cart fab */
   .fab-cart{
@@ -797,7 +799,7 @@ window.addEventListener('resize', applyViewport);
 let uiResizeT;
 window.addEventListener('resize', () => {
   clearTimeout(uiResizeT);
-  uiResizeT = setTimeout(() => { if(settings) sizeMarquee(settings.theme); syncCatFades(); }, 150);
+  uiResizeT = setTimeout(() => { if(settings) sizeMarquee(settings.theme); syncCatFades(); fitCardPrices(); }, 150);
 });
 
 // colorScheme ('light' | 'dark') — дублируем его в CSS color-scheme, чтобы
@@ -919,6 +921,18 @@ function priceHTML(p){
   if(settings?.commerce.priceHidden) return esc(settings.commerce.priceHiddenText);
   const old = p.oldPrice && p.oldPrice > p.price ? `<span class="card-old-price">${fmt(p.oldPrice)}</span>` : '';
   return fmt(p.price) + old;
+}
+
+// Старая цена рядом с новой: в узкой колонке обе не влезают в одну строку, и
+// overflow рисовал голое «…» после цены — выглядело как битый текст. Если не
+// влезают — прячем старую цену целиком: скидка всё равно видна в карточке товара.
+function fitCardPrices(){
+  document.querySelectorAll('.card-price').forEach(el => {
+    const old = el.querySelector('.card-old-price');
+    if(!old) return;
+    old.style.display = '';
+    if(el.scrollWidth > el.clientWidth) old.style.display = 'none';
+  });
 }
 
 // --- рендер ---
@@ -1109,6 +1123,7 @@ function renderGrid(){
   grid.querySelectorAll('[data-open]').forEach(el=>{
     el.onclick = () => openDetail(Number(el.dataset.id));
   });
+  fitCardPrices();
 }
 
 /* ===================== ГАЛЕРЕЯ ===================== */

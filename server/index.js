@@ -474,7 +474,10 @@ async function handleApi(req, res, url) {
 
   if (p === '/api/products' && method === 'GET') {
     const s = getSettings();
-    let list = store.read('products', []);
+    // Скрытые товары не отдаём вообще. Раньше их прятала только витрина, а сам
+    // список был публичным: название и цену неопубликованного товара можно было
+    // прочитать в /api/products, да и заказать его тоже.
+    let list = store.read('products', []).filter(x => !x.hidden);
     if (s.catalog.hideSoldOut) list = list.filter(x => x.stock !== 0);
     return json(res, 200, list);
   }
@@ -551,7 +554,7 @@ async function handleApi(req, res, url) {
     const products = store.read('products', []);
     // сумму считаем сами по корзине из запроса, но по ценам из базы
     const total = (body.items || []).reduce((sum, i) => {
-      const prod = products.find(x => x.id === Number(i.id));
+      const prod = products.find(x => x.id === Number(i.id) && !x.hidden);
       return sum + (prod ? prod.price * Math.max(1, Math.min(999, Number(i.qty) || 1)) : 0);
     }, 0);
 
@@ -566,6 +569,11 @@ async function handleApi(req, res, url) {
     try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
 
     const s = getSettings();
+    // Магазин на паузе. Витрина в этом режиме показывает заглушку вместо
+    // каталога, но POST мимо неё проходил — и «закрытый» магазин продолжал
+    // копить заказы, о которых продавец не знал.
+    if (s.advanced.maintenanceMode) return json(res, 503, { error: s.advanced.maintenanceText });
+
     const tgUser = validateInitData(body.initData || '');
     // initData прислали, но подпись не сошлась — это подделка, а не «открыли в браузере».
     // Пустой initData по-прежнему значит «вне Telegram» и помечается гостем.
@@ -573,13 +581,28 @@ async function handleApi(req, res, url) {
     const products = store.read('products', []);
 
     const items = (body.items || []).map(i => {
-      const prod = products.find(x => x.id === Number(i.id));
+      // hidden — товар снят с витрины: заказать его нельзя даже по прямой ссылке
+      const prod = products.find(x => x.id === Number(i.id) && !x.hidden);
       if (!prod) return null;
       const qty = Math.max(1, Math.min(999, Number(i.qty) || 1));
       return { id: prod.id, name: prod.name, price: Number(prod.price) || 0, qty };
     }).filter(Boolean);
 
     if (!items.length) return json(res, 400, { error: 'корзина пуста' });
+
+    // Остатки проверяет сервер, а не только витрина. Витрина не даёт положить в
+    // корзину больше, чем есть, но прямой запрос это обходил: заказ на
+    // раскупленный товар принимался, а остаток гасился в ноль через Math.max —
+    // продавец получал заказ на то, чего нет.
+    for (const i of items) {
+      const prod = products.find(x => x.id === i.id);
+      if (!prod || typeof prod.stock !== 'number' || prod.stock >= i.qty) continue;
+      return json(res, 400, {
+        error: prod.stock === 0
+          ? `«${prod.name}» раскуплен`
+          : `«${prod.name}»: осталось ${prod.stock} шт.`,
+      });
+    }
 
     const total = items.reduce((sum, i) => sum + i.price * i.qty, 0);
     if (s.commerce.minOrder && total < s.commerce.minOrder) {
@@ -597,6 +620,13 @@ async function handleApi(req, res, url) {
     const finalTotal = total - (promo ? promo.discount : 0);
 
     const c = body.customer || {};
+    // Обязательный телефон проверяем и здесь: на витрине это валидация формы,
+    // а сервер принимал заказ без контакта, до которого потом не дозвониться.
+    // Порог в 10 цифр — тот же, что в форме, чтобы правила не разъезжались.
+    if (s.checkout.askPhone && s.checkout.phoneRequired &&
+        String(c.phone || '').replace(/\D/g, '').length < 10) {
+      return json(res, 400, { error: 'Укажите телефон' });
+    }
     const built = buildOrderText(s, items, c, tgUser, promo, finalTotal);
     let text = built.text;
     if (!tgUser) text += '\n\n⚠️ <i>Заказ оформлен вне Telegram — личность не подтверждена</i>';

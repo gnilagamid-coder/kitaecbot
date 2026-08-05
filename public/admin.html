@@ -1299,9 +1299,13 @@ async function buildOrders(){
           <span>#${o.id}</span>
           <span>${new Date(o.at).toLocaleString(settings.advanced.locale)}</span>
         </div>
+        <!-- Всё, что пришло от покупателя, экранируем. Имя, телефон и адрес он
+             вписывает сам, а раньше они шли в innerHTML сырыми: заказ с именем
+             вида <img src=x onerror=...> выполнял произвольный скрипт прямо в
+             админке, где в sessionStorage лежит токен доступа. -->
         <pre>${esc(o.items.map(i=>`${i.name} × ${i.qty} — ${fmt(i.price*i.qty)}`).join('\n'))}
 Итого: ${fmt(o.total)}
-${o.customer.name || ''}${o.customer.phone ? ' · '+o.customer.phone : ''}${o.user && o.user.username ? ' · @'+o.user.username : ''}${o.customer.address ? '\n'+o.customer.address : ''}</pre>
+${esc(o.customer.name || '')}${o.customer.phone ? ' · '+esc(o.customer.phone) : ''}${o.user && o.user.username ? ' · @'+esc(o.user.username) : ''}${o.customer.address ? '\n'+esc(o.customer.address) : ''}</pre>
       </div>`).join('')}
     <button type="button" class="ghost" id="clearOrders" style="width:100%;margin-top:10px">Очистить историю</button>
   ` : '<div class="empty">Заказов пока нет</div>';
