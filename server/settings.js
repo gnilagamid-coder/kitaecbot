@@ -121,6 +121,9 @@ const DEFAULTS = {
     includeCustomerLink: true,
     silent: false,          // без звука
   },
+  announce: {
+    enabled: true,          // анонсы новинок и смены цен подписчикам бота
+  },
 
   // --- публикация в канал ---
   channel: {
@@ -312,6 +315,9 @@ function sanitize(input) {
       onNewUser: bool(n.onNewUser),
       includeCustomerLink: bool(n.includeCustomerLink, true),
       silent: bool(n.silent),
+    },
+    announce: {
+      enabled: bool((s.announce || {}).enabled, true),
     },
     channel: {
       channelId: str(cn.channelId, '', 60).trim(),

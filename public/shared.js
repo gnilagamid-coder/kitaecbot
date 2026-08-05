@@ -27,6 +27,12 @@ function applyTheme(theme, rootEl) {
   set('--radius', r.radius + 'px');
   set('--bw', r.borderWidth + 'px');
   set('--font-display', FONT_STACKS[r.fontDisplay] || FONT_STACKS.system);
+  // Текстовый шрифт тела: если тема выбрана с «текстовой» гарнитурой
+  // (Inter, Space Grotesk), тело тоже идёт ею — иначе на странице живут две
+  // разные гарнитуры и клиент видит «шрифт разный». Дисплейные (Oswald,
+  // Archivo Black) для длинного текста не предназначены — тело системное.
+  set('--font-body', /Inter|Space Grotesk/.test(r.fontDisplay) && FONT_STACKS[r.fontDisplay]
+    ? FONT_STACKS[r.fontDisplay] : FONT_STACKS.system);
   set('--fs', (r.fontScale / 100).toFixed(2));
   set('--gap', (DENSITY[r.density] || 1).toFixed(2));
   set('--caps', r.uppercase ? 'uppercase' : 'none');

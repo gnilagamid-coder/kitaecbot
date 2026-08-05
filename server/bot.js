@@ -48,7 +48,7 @@ function menuButtonText(s) {
   return cleaned || 'Магазин';
 }
 
-function menuKeyboard(s, chatId) {
+function menuKeyboard(s, chatId, subscribed) {
   const link = s.channel.miniAppLink;
   const rows = [];
   // web_app открывает НАСТОЯЩИЙ мини-апп (обвязка Telegram, initData),
@@ -60,6 +60,15 @@ function menuKeyboard(s, chatId) {
   if (s.manager.supportUrl || s.manager.buyUrl) {
     const raw = s.manager.supportUrl || s.manager.buyUrl;
     rows.push([{ text: '💬 Написать менеджеру', url: normalize(raw) }]);
+  }
+  // Переключатель подписки на анонсы. Подписка строго опциональна, поэтому
+  // кнопка показывается только когда явно передали состояние (приветствие
+  // /start, ответы /subscribe//unsubscribe, нажатие кнопки) — в остальных
+  // местах она не мельтешит.
+  if (subscribed !== undefined && s.announce && s.announce.enabled) {
+    rows.push([subscribed
+      ? { text: '🔕 Отписаться от анонсов', callback_data: 'sub:off' }
+      : { text: '🔔 Подписаться на анонсы', callback_data: 'sub:on' }]);
   }
   return rows.length ? { inline_keyboard: rows } : undefined;
 }
@@ -92,6 +101,7 @@ async function sendWithFallback(payload, label) {
 }
 
 async function handleUpdate(update) {
+  if (update.callback_query) return handleCallback(update.callback_query);
   const msg = update.message || update.edited_message;
   if (!msg || !msg.chat) return;
 
@@ -114,11 +124,16 @@ async function handleUpdate(update) {
   }
 
   if (text === '/start' || text.startsWith('/start ')) {
+    // подписка на анонсы строго опциональна: в приветствии показываем кнопку
+    // «🔔 Подписаться», но без явного действия никто не подписывается
+    const sub = s.announce.enabled
+      ? Boolean(users[chatId] && users[chatId].subAnnounce === true)
+      : undefined;
     await sendWithFallback({
       chat_id: chatId,
       text: fill(s.bot.welcomeText, { name, shop: esc(s.brand.shopName) }),
       parse_mode: 'HTML',
-      reply_markup: menuKeyboard(s, chatId),
+      reply_markup: menuKeyboard(s, chatId, sub),
     }, 'приветствие');
     return;
   }
@@ -148,11 +163,65 @@ async function handleUpdate(update) {
     return;
   }
 
+  // Подписка на анонсы — только явное действие: кнопка «🔔 Подписаться»
+  // в приветствии или команда /subscribe. По умолчанию НЕ подписан никто.
+  if (text === '/unsubscribe') {
+    users[chatId] = { ...(users[chatId] || { id: chatId }), name, subAnnounce: false };
+    store.write('users', users);
+    await sendWithFallback({
+      chat_id: chatId,
+      text: `Готово, ${name} — анонсы приходить не будут. Передумаете — отправьте /subscribe`,
+      parse_mode: 'HTML',
+      reply_markup: menuKeyboard(s, chatId, false),
+    }, 'ответ на /unsubscribe');
+    return;
+  }
+
+  if (text === '/subscribe') {
+    users[chatId] = { ...(users[chatId] || { id: chatId }), name, subAnnounce: true };
+    store.write('users', users);
+    await sendWithFallback({
+      chat_id: chatId,
+      text: `Отлично, ${name}! Теперь вы будете первыми узнавать о новинках и смене цен.`,
+      parse_mode: 'HTML',
+      reply_markup: menuKeyboard(s, chatId, true),
+    }, 'ответ на /subscribe');
+    return;
+  }
+
   // всё остальное — пересылаем менеджеру как вопрос от клиента
   if (text && s.notify.enabled && s.notify.onInquiry) {
     const who = msg.from && msg.from.username ? `@${esc(msg.from.username)}` : `<code>${chatId}</code>`;
     await notifyManagers(s, `💬 Сообщение боту от ${name} ${who}:\n\n${esc(text)}`);
   }
+}
+
+// Нажатие кнопок подписки на анонсы. Сюда попадаем только с явным действием,
+// так что рассылка остаётся строго опциональной: получает её лишь тот,
+// у кого subAnnounce === true.
+async function handleCallback(cb) {
+  const data = String(cb.data || '');
+  if (data !== 'sub:on' && data !== 'sub:off') return;
+  const chatId = cb.message && cb.message.chat && cb.message.chat.id;
+  if (!chatId) return;
+  const on = data === 'sub:on';
+  const users = store.read('users', {});
+  users[chatId] = {
+    ...(users[chatId] || { id: chatId }),
+    name: esc(cb.from && cb.from.first_name || 'друг'),
+    subAnnounce: on,
+  };
+  store.write('users', users);
+  await tgApi('answerCallbackQuery', {
+    callback_query_id: cb.id,
+    text: on ? 'Подписались на анонсы 🔔' : 'Отписались от анонсов',
+  });
+  // переключаем кнопку на противоположную — состояние видно прямо в чате
+  await tgApi('editMessageReplyMarkup', {
+    chat_id: chatId,
+    message_id: cb.message.message_id,
+    reply_markup: menuKeyboard(settings(), chatId, on),
+  });
 }
 
 async function notifyManagers(s, text) {
@@ -175,6 +244,41 @@ async function notifyManagers(s, text) {
   return failed === 0;
 }
 
+// Анонс только явно подписавшимся: subAnnounce === true ставится кнопкой
+// «🔔 Подписаться на анонсы» в приветствии или командой /subscribe.
+// По умолчанию не подписан никто. Группы и каналы (отрицательный chat_id)
+// не трогаем, потолок одной рассылки — 200 адресатов с паузой 35 мс,
+// чтобы не влететь в глобальный лимит Telegram.
+async function sendToSubscribers(text, label, s0) {
+  const s = s0 || settings();
+  const users = store.read('users', {});
+  const ids = Object.keys(users)
+    .filter(id => Number(id) > 0 && users[id] && users[id].subAnnounce === true)
+    .slice(0, 200);
+  if (!ids.length) {
+    console.log(`[bot] ${label}: подписчиков нет — пропускаю`);
+    return { sent: 0, total: 0 };
+  }
+  // кнопка мини-аппа, как у покупателей; если домен не привязан —
+  // sendWithFallback сам переотправит сообщение без неё
+  const appUrl = shopWebAppUrl(s);
+  const kb = appUrl
+    ? { inline_keyboard: [[{ text: s.bot.buttonText, web_app: { url: appUrl } }]] }
+    : undefined;
+  let sent = 0;
+  for (const id of ids) {
+    const res = await sendWithFallback({
+      chat_id: Number(id), text,
+      parse_mode: 'HTML', disable_web_page_preview: true,
+      reply_markup: kb,
+    }, `${label} подписчику ${id}`);
+    if (res.ok) sent++;
+    await sleep(35);
+  }
+  console.log(`[bot] ${label}: доставлено ${sent}/${ids.length} подписчикам`);
+  return { sent, total: ids.length };
+}
+
 const POLL_TIMEOUT = 25;                 // сколько Telegram держит соединение
 const POLL_ABORT_MS = POLL_TIMEOUT * 1000 + 8000; // запас на дорогу
 
@@ -190,7 +294,7 @@ async function poll() {
       // Цикл сам себе ретрай, дублировать его внутри tgApi не нужно.
       const res = await tgApi(
         'getUpdates',
-        { offset, timeout: POLL_TIMEOUT, allowed_updates: ['message'] },
+        { offset, timeout: POLL_TIMEOUT, allowed_updates: ['message', 'callback_query'] },
         { retries: 0, timeoutMs: POLL_ABORT_MS }
       );
 
@@ -241,6 +345,8 @@ function webhookSecret() {
 const COMMANDS = [
   { command: 'start', description: 'Открыть магазин' },
   { command: 'shop', description: 'Каталог' },
+  { command: 'subscribe', description: 'Получать анонсы новинок' },
+  { command: 'unsubscribe', description: 'Не получать анонсы' },
   { command: 'support', description: 'Связаться с менеджером' },
   { command: 'id', description: 'Показать мой chat_id' },
 ];
@@ -294,7 +400,7 @@ async function start() {
       const res = await tgApi('setWebhook', {
         url,
         secret_token: webhookSecret(),
-        allowed_updates: ['message'],
+        allowed_updates: ['message', 'callback_query'],
         max_connections: 40,
       });
       if (res.ok) {
@@ -314,4 +420,4 @@ async function start() {
 
 function stop() { running = false; }
 
-module.exports = { start, stop, notifyManagers, fill, normalize, handleUpdate, webhookSecret, shopWebAppUrl, sendWithFallback };
+module.exports = { start, stop, notifyManagers, sendToSubscribers, fill, normalize, handleUpdate, webhookSecret, shopWebAppUrl, sendWithFallback };

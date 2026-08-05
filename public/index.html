@@ -27,7 +27,7 @@
   body{
     background:var(--bg);
     color:var(--text);
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    font-family:var(--font-body,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif);
     font-size:calc(15px * var(--fs));
     -webkit-tap-highlight-color:transparent;
     overflow-x:hidden;
@@ -146,8 +146,11 @@
   }
 
   /* search */
+  /* Верхний отступ равен типовому шагу секций (12px): раньше было 4px, и
+     поле поиска прилипало к бегущей строке/шапке «из зазора» — клиент видел
+     два разнородных блока вместо цельного верха страницы. */
   .search{
-    margin:calc(4px * var(--gap)) 16px calc(20px * var(--gap));padding:12px 16px;
+    margin:calc(12px * var(--gap)) 16px calc(20px * var(--gap));padding:12px 16px;
     background:var(--surface);border:var(--bw) solid var(--surface-2);border-radius:var(--radius);
     display:flex;align-items:center;gap:10px;
   }
@@ -186,7 +189,15 @@
 
   /* products */
   .products-head{display:flex;justify-content:space-between;align-items:center;padding:0 16px;margin-bottom:10px;gap:10px}
-  .sort-select{background:var(--surface);color:var(--text);border-radius:var(--radius);padding:10px;font-size:calc(12px * var(--fs))}
+  /* Нативная стрелка <select> в WebView на Android то уезжала влево, то вовсе
+     не рисовалась — рисуем свой шеврон справа и глушим системный. */
+  .sort-wrap{position:relative;flex-shrink:0}
+  .sort-select{
+    appearance:none;-webkit-appearance:none;-moz-appearance:none;
+    background:var(--surface);color:var(--text);border-radius:var(--radius);
+    padding:10px 30px 10px 12px;font-size:calc(12px * var(--fs));font-family:var(--font-display);letter-spacing:.3px;
+  }
+  .sort-caret{position:absolute;right:10px;top:50%;transform:translateY(-50%);width:12px;height:12px;color:var(--muted);pointer-events:none}
   .products-count{font-size:calc(13px * var(--fs));color:var(--muted);padding:0 16px;margin-bottom:14px}
   .grid{display:grid;grid-template-columns:repeat(var(--cols,2),1fr);gap:calc(12px * var(--gap));padding:0 16px calc(96px + var(--safe-bottom))}
   .card{background:var(--surface);border:var(--bw) solid var(--surface-2);border-radius:var(--radius);overflow:hidden;animation:cardIn .26s cubic-bezier(.2,.8,.2,1) both;transition:transform .1s}
@@ -487,6 +498,11 @@
   #maintenance h1{font-family:var(--font-display);font-size:calc(26px * var(--fs));text-transform:var(--caps);margin-bottom:12px}
   #maintenance p{color:var(--muted);line-height:1.6;white-space:pre-line}
 
+    /* превью в админке: системный скроллбар внутри «телефона» выглядит как
+       белая полоса — в режиме превью прячем его */
+    body.in-preview{scrollbar-width:none}
+    body.in-preview::-webkit-scrollbar{display:none}
+  
   @media (min-width:700px){ .grid{--cols:3} }
   @media (min-width:1000px){
     body{max-width:1100px;margin:0 auto}
@@ -610,12 +626,15 @@
 
 <div class="products-head">
   <div class="section-title" style="padding:0">Каталог</div>
-  <select class="sort-select" id="sortSelect">
-    <option value="default">По умолчанию</option>
-    <option value="price-asc">Сначала дешёвые</option>
-    <option value="price-desc">Сначала дорогие</option>
-    <option value="name">По названию</option>
-  </select>
+  <span class="sort-wrap">
+    <select class="sort-select" id="sortSelect">
+      <option value="default">По умолчанию</option>
+      <option value="price-asc">Сначала дешёвые</option>
+      <option value="price-desc">Сначала дорогие</option>
+      <option value="name">По названию</option>
+    </select>
+    <svg class="sort-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+  </span>
 </div>
 <div class="products-count" id="prodCount"></div>
 <div class="grid" id="grid"></div>
@@ -732,6 +751,24 @@ const haptic = {
   err:   () => { try{ tg?.HapticFeedback?.notificationOccurred('error'); }catch(e){} },
   sel:   () => { try{ tg?.HapticFeedback?.selectionChanged(); }catch(e){} },
 };
+
+// Битое изображение (файл удалён, потерян при переносе/восстановлении) не должно
+// показываться покупателю как «дырка» браузера: подменяем заглушкой. Ловим ошибку
+// делегированно — одна точка на все <img> витрины (карточки, галерея, избранное, лого).
+document.addEventListener('error', e => {
+  const img = e.target;
+  if(!(img instanceof Image) || img.dataset.fb) return;
+  img.dataset.fb = '1';
+  const logo = img.closest('#shopLogo');
+  if(logo){
+    const fb = (settings && logoMarkSVG(settings.brand.logoMark)) ||
+      `<span>${esc(settings ? settings.brand.shopIcon : '') || '🛒'}</span>`;
+    img.outerHTML = fb;
+    return;
+  }
+  const wrap = img.closest('.card-img,.detail-gallery-slide,.fav-thumb');
+  if(wrap){ img.remove(); if(!wrap.querySelector('svg')) wrap.insertAdjacentHTML('afterbegin', PLACEHOLDER_SVG); }
+}, true);
 
 // Telegram может рисовать поверх контента системную шторку и свою панель.
 // CSS env(safe-area-inset-*) внутри Mini Apps не работает — берём отступы из SDK,
@@ -2235,6 +2272,7 @@ async function loadProducts(){
 // страница, встроившая нас в iframe, могла бы подменить магазин.
 const IS_PREVIEW = new URLSearchParams(location.search).has('preview');
 if(IS_PREVIEW){
+  document.body.classList.add('in-preview');
   // Превью прячем до первых настроек из админки: иначе видно, как оно
   // рисуется дефолтной тёмной темой и только потом перекрашивается в нужную.
   document.documentElement.style.visibility = 'hidden';

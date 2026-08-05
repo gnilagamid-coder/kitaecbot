@@ -117,8 +117,11 @@
   .photo-slot.filled{border-style:solid;border-color:var(--surface-2);cursor:default}
   .photo-slot img{width:100%;height:100%;object-fit:cover}
   .photo-slot input{display:none}
-  .photo-slot .photo-remove{position:absolute;top:3px;right:3px;width:22px;height:22px;background:rgba(0,0,0,.65);color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px}
-  .photo-slot .photo-main-tag{position:absolute;bottom:0;left:0;right:0;background:var(--accent);color:var(--on-accent);font-size:9px;font-weight:700;text-align:center;text-transform:uppercase;padding:2px 0}
+  /* панель управления фото: главное / порядок / замена / удаление */
+  .photo-slot .photo-tools{position:absolute;left:0;right:0;bottom:0;display:flex;background:rgba(0,0,0,.72)}
+  .photo-slot .photo-tools button,.photo-slot .photo-tools label{flex:1;width:auto;height:26px;padding:0;background:transparent;color:#fff;font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;letter-spacing:0;text-transform:none;font-weight:400}
+  .photo-slot .photo-tools button:disabled{opacity:.25;cursor:default}
+  .photo-slot .photo-main-tag{position:absolute;top:3px;left:3px;background:var(--accent);color:var(--on-accent);font-size:9px;font-weight:700;text-transform:uppercase;padding:2px 6px}
 
   .list{display:flex;flex-direction:column;gap:8px}
   .list-title{font-family:var(--font-display);font-size:15px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;margin:20px 0 10px}
@@ -188,11 +191,16 @@
   /* превью витрины «в телефоне» */
   .preview-card h2{align-items:center}
   .phone{
-    width:100%;max-width:300px;margin:0 auto;aspect-ratio:9/17;
+    width:100%;max-width:300px;margin:0 auto;height:614px;
     border:8px solid #000;border-radius:26px;overflow:hidden;background:#000;
     box-shadow:0 6px 26px rgba(0,0,0,.5);
   }
-  .phone iframe{width:100%;height:100%;border:0;display:block}
+  /* iframe всегда рендерится в реальном размере телефона (390×844 CSS-px) и
+     ужимается под ширину рамки через transform. Раньше iframe наследовал
+     ширину рамки (~284px) — мобильная вёрстка при такой ширине не та, что на
+     настоящем телефоне, и превью выглядело «не как в жизни». Высота рамки
+     пересчитывается в fitPreview(). */
+  .phone iframe{width:390px;height:844px;border:0;display:block;transform-origin:0 0}
 
   /* диагностика */
   .check{display:flex;gap:10px;align-items:flex-start;padding:11px 0;border-bottom:1px solid var(--surface-2)}
@@ -589,6 +597,18 @@ function selectTab(id){
   $('previewHost').style.display = id === 'theme' ? '' : 'none';
   window.scrollTo(0,0);
   buildPanel(id);
+  // ширина колонки зависит от брейкпоинта — подгоняем масштаб превью после
+  // того, как панель показана (и ещё раз после применения стилей)
+  if(id === 'theme'){ fitPreview(); requestAnimationFrame(fitPreview); }
+}
+
+function fitPreview(){
+  const ph = document.querySelector('.phone');
+  const fr = document.getElementById('previewFrame');
+  if(!ph || !fr || !ph.clientWidth) return;
+  const scale = ph.clientWidth / 390;
+  fr.style.transform = `scale(${scale})`;
+  ph.style.height = Math.round(844 * scale) + 'px';
 }
 
 function buildPanel(id){
@@ -778,6 +798,8 @@ setInterval(() => {
   if(activeTab !== 'theme' || !settings) return;
   if(previewAcked !== JSON.stringify(settings)) pushPreview(true);
 }, 400);
+
+window.addEventListener('resize', debounce(fitPreview, 150));
 
 window.addEventListener('message', e => {
   if(e.origin !== location.origin) return;
@@ -1067,6 +1089,8 @@ const PANEL_BOT = () => ([
     F.sw('bot.notifyCustomer','Присылать копию заказа покупателю в чат'),
     F.area('bot.customerReceiptText','Текст чека', { sub:'Переменные: {name}, {id} — номер заказа, {total} — сумма' }),
   ]},
+  { title:'Анонсы подписчикам', hint:'Подписчики — только те, кто сам нажал «🔔 Подписаться на анонсы» в приветствии бота или отправил /subscribe. Анонс уходит при сохранении товара с галочкой «Уведомить подписчиков» (вкладка «Товары»). Отписка — кнопка «🔕 Отписаться» или /unsubscribe.',
+    fields:[ F.sw('announce.enabled','Анонсы о новинках и ценах') ]},
 ]);
 
 // ---------- Канал ----------
@@ -1311,6 +1335,12 @@ function buildProducts(){
         <div class="field"><label>Остаток</label><input id="pStock" type="number" min="0" placeholder="не ограничено"></div>
       </div>
       <div class="field"><label>Свой бейдж (вместо TOP)</label><input id="pBadge" placeholder="NEW / SALE / HIT" maxlength="16"></div>
+      <div class="field" id="announceRow" style="display:none">
+        <label style="display:flex;align-items:center;gap:8px;text-transform:none;color:var(--text);font-size:13.5px;cursor:pointer">
+          <input type="checkbox" id="pAnnounce" style="width:auto"> Уведомить подписчиков бота
+        </label>
+        <div class="sub">Разовая рассылка подписчикам анонсов — тем, кто сам нажал «🔔 Подписаться» в боте. Без галочки ничего не уходит.</div>
+      </div>
       <div style="display:flex;gap:8px;margin-top:12px">
         <button id="saveProductBtn" style="flex:1">Добавить товар</button>
         <button id="cancelEditBtn" class="ghost" style="display:none">Отмена</button>
@@ -1320,15 +1350,45 @@ function buildProducts(){
     <div class="field" id="prodSearchBox" style="${products.length > 7 ? '' : 'display:none'}">
       <input type="text" id="prodSearch" placeholder="Найти товар по названию или категории" autocomplete="off">
     </div>
-    <div class="list" id="list"></div>`;
+    <div class="list" id="list"></div>
+    <div class="card" style="margin-top:20px">
+      <h2>Проверка фото</h2>
+      <div class="hint">Ищет товары с пропавшими файлами фото и битый логотип — например, после переноса без папки images. Битые позиции чинятся тут же: переотправьте фото в карточке товара.</div>
+      <button type="button" class="secondary" id="auditBtn" style="width:100%">Проверить</button>
+      <div id="auditResult"></div>
+    </div>`;
 
   $('photoGrid') && renderPhotoGrid();
+  const ar = $('announceRow');
+  if(ar) ar.style.display = (settings.announce && settings.announce.enabled) ? '' : 'none';
   updateCategoryList();
   renderList();
   $('saveProductBtn').onclick = saveProduct;
   $('cancelEditBtn').onclick = resetProductForm;
   const ps = $('prodSearch');
   if(ps) ps.oninput = debounce(() => { productFilter = ps.value.trim().toLowerCase(); renderList(); }, 150);
+  $('auditBtn').onclick = () => runImageAudit($('auditBtn'));
+}
+
+async function runImageAudit(btn){
+  const out = $('auditResult');
+  btn.disabled = true; btn.textContent = 'Проверяю…';
+  try{
+    const r = await api('/api/admin/images/audit');
+    const rows = [];
+    if(r.logoBroken) rows.push(`<div class="row"><div class="info"><div class="name">Логотип магазина</div><div class="meta"><span class="category">файл не найден</span></div></div><div class="actions"><button class="icon-toggle" data-fix="logo" title="Исправить">✎</button></div></div>`);
+    for(const p of r.broken){
+      rows.push(`<div class="row"><div class="info"><div class="name">${esc(p.name)}</div><div class="meta"><span class="category">нет фото: ${p.missing.length}</span></div></div><div class="actions"><button class="icon-toggle" data-fix="${p.id}" title="Открыть карточку товара">✎</button></div></div>`);
+    }
+    out.innerHTML = rows.length
+      ? `<div class="list" style="margin-top:12px">${rows.join('')}</div>`
+      : '<div class="empty" style="padding:14px 0">Все фото на месте ✓</div>';
+    out.querySelectorAll('[data-fix]').forEach(b => b.onclick = () => {
+      if(b.dataset.fix === 'logo') return selectTab('brand');
+      editProduct(Number(b.dataset.fix));
+    });
+  }catch(e){ out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  btn.disabled = false; btn.textContent = 'Проверить';
 }
 
 function renderPhotoGrid(){
@@ -1340,7 +1400,13 @@ function renderPhotoGrid(){
     if(imgId){
       slots.push(`<div class="photo-slot filled"><img src="/api/image?id=${encodeURIComponent(thumbId)}">
         ${i === 0 ? '<span class="photo-main-tag">Главное</span>' : ''}
-        <button type="button" class="photo-remove" data-remove="${i}">×</button></div>`);
+        <div class="photo-tools">
+          <button type="button" data-main="${i}" title="Сделать главным" ${i===0?'disabled':''}>★</button>
+          <button type="button" data-left="${i}" title="Сдвинуть влево" ${i===0?'disabled':''}>‹</button>
+          <button type="button" data-right="${i}" title="Сдвинуть вправо" ${i===pendingImages.length-1?'disabled':''}>›</button>
+          <label title="Заменить это фото"><input type="file" accept="image/*" data-replace="${i}">⟲</label>
+          <button type="button" data-remove="${i}" title="Удалить">×</button>
+        </div></div>`);
     } else if(i === pendingImages.length){
       slots.push(`<label class="photo-slot">${PLACEHOLDER_SVG}<input type="file" accept="image/*" data-upload="${i}"></label>`);
     } else {
@@ -1351,9 +1417,32 @@ function renderPhotoGrid(){
   grid.querySelectorAll('[data-upload]').forEach(input => {
     input.onchange = e => onPhotoSelected(e, Number(input.dataset.upload));
   });
+  // замена конкретного фото — новый файл встаёт ровно в ту же ячейку
+  grid.querySelectorAll('[data-replace]').forEach(input => {
+    input.onchange = e => onPhotoSelected(e, Number(input.dataset.replace));
+  });
+  grid.querySelectorAll('[data-main]').forEach(btn => {
+    btn.onclick = () => {
+      const i = Number(btn.dataset.main);
+      if(i <= 0) return;
+      pendingImages.unshift(pendingImages.splice(i, 1)[0]);
+      pendingThumbs.unshift(pendingThumbs.splice(i, 1)[0]);
+      renderPhotoGrid();
+    };
+  });
+  const swap = (i, j) => {
+    [pendingImages[i], pendingImages[j]] = [pendingImages[j], pendingImages[i]];
+    [pendingThumbs[i], pendingThumbs[j]] = [pendingThumbs[j], pendingThumbs[i]];
+    renderPhotoGrid();
+  };
+  grid.querySelectorAll('[data-left]').forEach(btn => btn.onclick = () => {
+    const i = Number(btn.dataset.left); if(i > 0) swap(i, i - 1);
+  });
+  grid.querySelectorAll('[data-right]').forEach(btn => btn.onclick = () => {
+    const i = Number(btn.dataset.right); if(i < pendingImages.length - 1) swap(i, i + 1);
+  });
   grid.querySelectorAll('[data-remove]').forEach(btn => {
-    btn.onclick = e => {
-      e.preventDefault();
+    btn.onclick = () => {
       const i = Number(btn.dataset.remove);
       pendingImages.splice(i, 1); pendingThumbs.splice(i, 1);
       renderPhotoGrid();
@@ -1418,6 +1507,8 @@ async function saveProduct(){
     stock: val('pStock') === '' ? null : Math.max(0, Number(val('pStock')) || 0),
     badge: val('pBadge'),
     images: pendingImages, thumbs: pendingThumbs,
+    // рассылка — только явным желанием: галочка + включённые анонсы в настройках
+    announce: !!($('pAnnounce') && $('pAnnounce').checked && settings.announce && settings.announce.enabled),
   };
 
   try{
@@ -1439,6 +1530,7 @@ async function saveProduct(){
 function resetProductForm(){
   editingId = null;
   ['pName','pCategory','pDesc','pPrice','pOldPrice','pStock','pBadge'].forEach(id => { if($(id)) $(id).value = ''; });
+  if($('pAnnounce')) $('pAnnounce').checked = false; // анонсы строго опциональны: галочку ставят осознанно
   pendingImages = []; pendingThumbs = [];
   renderPhotoGrid();
   $('prodFormTitle').textContent = 'Добавить товар';
@@ -1457,6 +1549,7 @@ function editProduct(id){
   $('pOldPrice').value = p.oldPrice ?? '';
   $('pStock').value = typeof p.stock === 'number' ? p.stock : '';
   $('pBadge').value = p.badge || '';
+  if($('pAnnounce')) $('pAnnounce').checked = false; // правка товара молчит, если продавец сам не отметит
   pendingImages = [...(p.images || [])];
   pendingThumbs = [...(p.thumbs || [])];
   renderPhotoGrid();
@@ -1666,6 +1759,16 @@ try{
 
 // не терять несохранённые настройки при случайном закрытии
 window.addEventListener('beforeunload', e => { if(dirty){ e.preventDefault(); e.returnValue = ''; } });
+
+// Битая миниатюра в админке (например, файл пропал после переноса) не должна
+// выглядеть дырой: вместо <img> подставляем заглушку
+document.addEventListener('error', e => {
+  const img = e.target;
+  if(!(img instanceof Image) || img.dataset.fb) return;
+  img.dataset.fb = '1';
+  const wrap = img.closest('.thumb,.photo-slot,.upload-preview');
+  if(wrap){ img.remove(); if(!wrap.querySelector('svg')) wrap.insertAdjacentHTML('afterbegin', PLACEHOLDER_SVG); }
+}, true);
 </script>
 </body>
 </html>

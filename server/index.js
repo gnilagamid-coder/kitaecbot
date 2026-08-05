@@ -299,6 +299,23 @@ const money = (n, s) => {
   return s.commerce.currencyPosition === 'before' ? `${s.commerce.currency}${v}` : `${v} ${s.commerce.currency}`;
 };
 
+// Анонс подписчикам бота: новинка или смена цены. Стреляем fire-and-forget —
+// ответ админке не должен зависеть от скорости рассылки по сотням чатов,
+// а сбой доставки не должен ломать сохранение товара.
+function announceProduct(s, product, kind, oldPrice) {
+  if (!s.announce || !s.announce.enabled) return;
+  const shop = esc(s.brand.shopName);
+  let text;
+  if (kind === 'price') {
+    text = `💪 <b>${shop}</b> — изменилась цена\n\n<b>${esc(product.name)}</b> — теперь ${money(product.price, s)}` +
+      (oldPrice != null ? ` (было ${money(oldPrice, s)})` : '');
+  } else {
+    text = `🆕 <b>${shop}</b> — новинка!\n\n<b>${esc(product.name)}</b>` +
+      (s.commerce.priceHidden ? '' : ` — ${money(product.price, s)}`);
+  }
+  bot.sendToSubscribers(text, 'анонс', s).catch(e => console.error('[announce]', e.message));
+}
+
 // ---------- статика ----------
 // Тема, зашитая прямо в HTML. Клиент получает готовые CSS-переменные в первом
 // же байте ответа и рисует правильную палитру сразу — без «дефолтная тёмная,
@@ -765,6 +782,8 @@ async function handleApi(req, res, url) {
         if (!product.name) return json(res, 400, { error: 'нужно название' });
         products.push(product);
         store.write('products', products);
+        // рассылка — только при явном флаге из формы товара
+        if (b.announce === true) announceProduct(getSettings(), product, 'new');
         return json(res, 200, product);
       }
 
@@ -772,9 +791,26 @@ async function handleApi(req, res, url) {
         let b; try { b = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
         const idx = products.findIndex(x => x.id === Number(b.id));
         if (idx === -1) return json(res, 404, { error: 'не найден' });
-        products[idx] = normalizeProduct({ ...products[idx], ...b, id: products[idx].id });
+        const old = products[idx];
+        const updated = normalizeProduct({ ...old, ...b, id: old.id });
+        products[idx] = updated;
         store.write('products', products);
-        return json(res, 200, products[idx]);
+        // Фото, убранные из карточки, стираем с диска — но только если на них
+        // не ссылается другой товар. Без этого каждая замена плодила бы сирот.
+        const kept = new Set([...(updated.images || []), ...(updated.thumbs || [])]);
+        const referenced = new Set();
+        for (const other of products) {
+          if (other.id === updated.id) continue;
+          for (const id of [...(other.images || []), ...(other.thumbs || [])]) referenced.add(id);
+        }
+        for (const id of [...(old.images || []), ...(old.thumbs || [])]) {
+          if (id && !kept.has(id) && !referenced.has(id)) await store.deleteImage(id);
+        }
+        if (b.announce === true) {
+          const priceChanged = old.price !== updated.price;
+          announceProduct(getSettings(), updated, priceChanged ? 'price' : 'new', priceChanged ? old.price : null);
+        }
+        return json(res, 200, updated);
       }
 
       if (method === 'DELETE') {
@@ -811,6 +847,21 @@ async function handleApi(req, res, url) {
     }
 
     if (p === '/api/admin/views' && method === 'GET') return json(res, 200, store.read('views', {}));
+
+    // Аудит картинок: товары с пропавшими файлами + битый логотип. Типичный
+    // сценарий — перенос/восстановление без папки images. Витрина уже прячет
+    // дыры заглушками, а этот список позволяет переотправить фото адресно.
+    if (p === '/api/admin/images/audit' && method === 'GET') {
+      const list = store.read('products', []);
+      const broken = [];
+      for (const pr of list) {
+        const missing = [...new Set([...(pr.images || []), ...(pr.thumbs || [])])].filter(id => id && !store.imagePath(id));
+        if (missing.length) broken.push({ id: pr.id, name: pr.name, missing });
+      }
+      const s = getSettings();
+      const logoBroken = Boolean(s.brand.logoImage) && !store.imagePath(s.brand.logoImage);
+      return json(res, 200, { broken, logoBroken });
+    }
 
     if (p === '/api/admin/orders') {
       if (method === 'GET') return json(res, 200, store.read('orders', []));
