@@ -323,6 +323,10 @@
     box-shadow:3px 3px 0 rgba(0,0,0,.5);z-index:15;transition:transform .15s;border-radius:var(--radius);
   }
   .fab-cart:active{transform:scale(.9)}
+  /* Кнопка корзины висит ровно над «+» правой колонки сетки и перекрывала его:
+     промахнуться мимо товара было легко. Прячем её, пока покупатель листает
+     вниз, и возвращаем, как только он остановился или пошёл вверх. */
+  .fab-cart.hidden{transform:translateY(calc(100% + 24px));pointer-events:none}
   .fab-cart svg{width:22px;height:22px}
   .fab-badge{
     position:absolute;top:-4px;right:-4px;background:var(--bg);color:var(--accent-2);
@@ -427,8 +431,11 @@
   .co-group-title::before{content:"";width:14px;height:2px;background:var(--accent);flex:0 0 auto}
   /* карточки-переключатели для доставки/оплаты */
   .co-options{display:flex;flex-wrap:wrap;gap:8px}
-  .co-option{width:auto;margin:0;padding:10px 14px;background:var(--surface-2);border:max(1px,var(--bw)) solid transparent;border-radius:var(--radius);color:var(--text);font-size:calc(13px * var(--fs));font-family:inherit;letter-spacing:.2px;transition:border-color .15s,color .15s}
-  .co-option.selected{border-color:var(--accent);color:var(--accent-2)}
+  /* Выбранный вариант — заливка акцентом, невыбранные — приглушённые.
+     Раньше было наоборот: у выбранного оставался только контур, а у остальных
+     стояла заливка, и «активным» читался как раз невыбранный. */
+  .co-option{width:auto;margin:0;padding:10px 14px;background:transparent;border:max(1px,var(--bw)) solid var(--surface-2);border-radius:var(--radius);color:var(--muted);font-size:calc(13px * var(--fs));font-family:inherit;letter-spacing:.2px;transition:background .15s,border-color .15s,color .15s}
+  .co-option.selected{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
 
   /* экран успеха после заказа */
   .co-success{text-align:center;padding-top:4px}
@@ -822,8 +829,10 @@ tg?.onEvent('themeChanged', () => {
 
 // --- данные ---
 const user = tg?.initDataUnsafe?.user || { first_name:"Гость", username:"guest", photo_url:"" };
+// Первую букву имени экранируем: символы вроде < или & делают SVG невалидным,
+// и вместо аватарки покупатель видит пустоту.
 const defaultAvatar = "data:image/svg+xml;utf8," + encodeURIComponent(
-  `<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80"><rect width="80" height="80" fill="#f2c94c"/><text x="50%" y="55%" font-size="34" fill="#0d0d0d" text-anchor="middle" font-family="sans-serif" font-weight="600">${(user.first_name||"?")[0].toUpperCase()}</text></svg>`
+  `<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80"><rect width="80" height="80" fill="#f2c94c"/><text x="50%" y="55%" font-size="34" fill="#0d0d0d" text-anchor="middle" font-family="sans-serif" font-weight="600">${esc((user.first_name||"?")[0].toUpperCase())}</text></svg>`
 );
 
 let products = [];
@@ -1107,7 +1116,7 @@ function renderGrid(){
           <div class="card-price">${priceHTML(p)}</div>
           <div class="card-name">${esc(p.name)}</div>
         </div>
-        ${showAdd ? `<button class="card-add tap44" data-id="${p.id}" ${soldOut ? 'disabled' : ''} aria-label="В корзину">
+        ${showAdd && !soldOut ? `<button class="card-add tap44" data-id="${p.id}" aria-label="В корзину">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
         </button>` : ''}
       </div>
@@ -1379,16 +1388,20 @@ function openDetail(id){
     inquiry: m.ctaProduct || 'Оставить заявку',
     catalog: '',
   };
-  buyBtn.textContent = soldOut ? 'Раскуплено' : labels[m.mode];
+  // У раскупленного товара слово «Раскуплено» стояло трижды подряд: плашкой под
+  // ценой, на главной кнопке и на кнопке корзины. Оставляем плашку (она объясняет
+  // состояние) и одну кнопку с действием — вторая при этом просто прячется,
+  // потому что добавлять в корзину всё равно нечего.
+  buyBtn.textContent = soldOut ? 'Нет в наличии' : labels[m.mode];
   buyBtn.style.display = m.mode === 'catalog' ? 'none' : '';
   buyBtn.disabled = soldOut;
   buyBtn.onclick = soldOut ? null : () => quickBuy(p);
 
-  const showCartBtn = m.enableCart && m.mode === 'cart';
+  const showCartBtn = m.enableCart && m.mode === 'cart' && !soldOut;
   cartBtn.style.display = showCartBtn ? '' : 'none';
-  cartBtn.textContent = soldOut ? 'Раскуплено' : '+ Добавить в корзину';
-  cartBtn.disabled = soldOut || (typeof p.stock === 'number' && (cart.get(id)||0) >= p.stock);
-  cartBtn.onclick = soldOut ? null : () => { addToCart(id); closeSheet('detailOverlay'); };
+  cartBtn.textContent = '+ Добавить в корзину';
+  cartBtn.disabled = typeof p.stock === 'number' && (cart.get(id) || 0) >= p.stock;
+  cartBtn.onclick = () => { addToCart(id); closeSheet('detailOverlay'); };
 
   openSheet('detailOverlay');
   trackView(id);
@@ -1580,8 +1593,13 @@ function themeHex(varName){
 // браузере объект тоже существует, но кнопка не отрисовывается — там нужна своя.
 // От этого зависит, рисовать ли кнопку в шторке: иначе выходит две «Оформить заказ»
 // разом, одна поверх другой.
+// Если setParams один раз бросил исключение, нативной кнопке доверять нельзя:
+// дальше считаем, что её нет, и рисуем свою в шторке. Без этого флага корзина
+// оставалась вообще без кнопки оформления — нативная не отрисовалась, а свою
+// не рисовали именно потому, что нативная «есть».
+let mainButtonBroken = false;
 function hasNativeMainButton(){
-  return !!(tg && tg.MainButton && tg.platform && tg.platform !== 'unknown');
+  return !mainButtonBroken && !!(tg && tg.MainButton && tg.platform && tg.platform !== 'unknown');
 }
 
 function syncMainButton(){
@@ -1595,14 +1613,21 @@ function syncMainButton(){
       mb.setParams({
         text: label.slice(0, 64) || 'Оформить заказ', // лимит Telegram — 64 символа
         color: themeHex('--accent'),
-        text_color: themeHex('--text'),
+        // именно --on-accent, а не --text: цвет считается ПОД акцентной заливкой
+        // кнопки. С белым акцентом (пресет ERD) и почти белым текстом надпись
+        // на нативной кнопке пропадала — та же беда, что чинили у своих кнопок.
+        text_color: themeHex('--on-accent'),
         is_active: !(settings.commerce.minOrder && total < settings.commerce.minOrder),
         is_visible: true,
       });
       mb.offClick(onMainButton); mb.onClick(onMainButton);
     }catch(e){
-      // не роняем корзину из-за кнопки: в шторке всё равно есть своя
+      // Нативная кнопка не поднялась — навсегда переключаемся на свою и
+      // перерисовываем корзину, иначе покупателю нечем оформить заказ.
+      console.warn('[MainButton] не удалось настроить, переключаюсь на кнопку в шторке:', e.message);
+      mainButtonBroken = true;
       mb.hide();
+      renderCart();
     }
   } else {
     mb.hide();
@@ -2084,6 +2109,24 @@ function syncBackButton(){
 // подписку той же ссылки через indexOf — проверено на реальном telegram-web-app.js.
 tg?.BackButton?.onClick(closeTopSheet);
 tg?.onEvent('backButtonClicked', closeTopSheet);
+
+// Автоскрытие кнопки корзины при прокрутке вниз. Порог 6px гасит дрожание
+// пальца, а таймер возвращает кнопку на месте — иначе она оставалась бы
+// спрятанной, если покупатель остановился, не начав листать обратно.
+(function autoHideFab(){
+  const fab = document.getElementById('cartBtn');
+  let last = window.scrollY, idleT;
+  window.addEventListener('scroll', () => {
+    const y = window.scrollY;
+    const dy = y - last;
+    if(Math.abs(dy) > 6){
+      fab.classList.toggle('hidden', dy > 0 && y > 120);
+      last = y;
+    }
+    clearTimeout(idleT);
+    idleT = setTimeout(() => fab.classList.remove('hidden'), 550);
+  }, { passive: true });
+})();
 
 document.getElementById('profileBtn').onclick = () => { haptic.tap(); openSheet('profileOverlay'); };
 document.getElementById('favBtn').onclick = () => { haptic.tap(); openSheet('favOverlay'); };

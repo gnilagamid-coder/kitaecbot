@@ -396,8 +396,13 @@ async function serveStatic(req, res, urlPath) {
     // мы модифицируем на лету, поэтому он не стримится, а собирается в памяти
     // (70 КБ, это ничего не стоит).
     if (isIndex) {
+      const s = getSettings();
       let html = await fsp.readFile(full, 'utf8');
-      html = html.replace('</head>', bootThemeCSS(getSettings()) + '</head>');
+      // Название магазина подставляем в разметку, а не только скриптом: иначе
+      // и вкладка браузера, и шапка мини-аппа секунду показывают заглушку
+      // «SHOP», прежде чем приедет /api/settings.
+      html = html.replace('<title>SHOP</title>', `<title>${esc(s.brand.shopName)}</title>`);
+      html = html.replace('</head>', bootThemeCSS(s) + '</head>');
       const buf = Buffer.from(html, 'utf8');
       const h = { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-cache', ETag: etag };
       if (/\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
