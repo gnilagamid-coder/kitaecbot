@@ -157,8 +157,21 @@
   .vps-row b{font-weight:600;text-align:right;overflow-wrap:anywhere}
 
   .order{background:var(--surface);border:1px solid var(--surface-2);padding:12px;margin-bottom:8px}
-  .order .head{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:6px}
+  .order .head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-bottom:6px}
   .order pre{white-space:pre-wrap;font-family:inherit;font-size:12.5px;line-height:1.5}
+  /* строка управления заказом: статус слева, отметка об оплате справа */
+  .order .foot{display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap}
+  .order .foot select{width:auto;flex:0 0 auto;padding:6px 26px 6px 9px;font-size:12.5px}
+  .paid-tag{font-size:11px;letter-spacing:.3px;text-transform:uppercase;color:#3ec98a;font-weight:600}
+  /* точка-индикатор статуса рядом с номером — видно, не читая селект */
+  .st-dot{width:8px;height:8px;flex:0 0 8px;border-radius:50%;display:inline-block;background:var(--muted)}
+  .st-new{background:var(--accent)} .st-processing{background:var(--accent-2)}
+  .st-shipped{background:#5aa9ff} .st-done{background:#3ec98a} .st-cancelled{background:var(--muted)}
+  .order-filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+  .ofilter{padding:7px 11px;background:var(--surface);border:1px solid var(--surface-2);font-size:12px;
+    font-family:var(--font-display);letter-spacing:.3px;text-transform:uppercase;color:var(--muted);cursor:pointer;white-space:nowrap}
+  .ofilter.active{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+  .ofilter b{font-weight:600;opacity:.75;margin-left:4px}
 
   .empty{color:var(--muted);text-align:center;padding:26px 0;font-size:13px}
 
@@ -1291,33 +1304,141 @@ async function loadVpsStatus(){
 }
 
 // ---------- Заказы ----------
+// Список подгружается страницами: раньше сюда приезжала вся история разом,
+// а сама история молча обрезалась на пятистах записях. Теперь сервер хранит
+// всё, а админка берёт по странице и умеет фильтровать по статусу.
+const ORDER_PAGE = 50;
+let orderFilter = '';
+let orderOffset = 0;
+let orderMeta = { counts:{}, statuses:[], total:0, hasMore:false };
+
 async function buildOrders(){
+  orderFilter = ''; orderOffset = 0; orders = [];
   $('panel-orders').innerHTML = '<div class="empty">Загружаю…</div>';
-  try{ orders = await api('/api/admin/orders'); }catch(e){ orders = []; }
-  $('panel-orders').innerHTML = orders.length ? `
-    <div class="list-title">Последние заказы</div>
-    ${orders.map(o => `
-      <div class="order">
-        <div class="head">
-          <span>#${o.id}</span>
-          <span>${new Date(o.at).toLocaleString(settings.advanced.locale)}</span>
-        </div>
-        <!-- Всё, что пришло от покупателя, экранируем. Имя, телефон и адрес он
-             вписывает сам, а раньше они шли в innerHTML сырыми: заказ с именем
-             вида <img src=x onerror=...> выполнял произвольный скрипт прямо в
-             админке, где в sessionStorage лежит токен доступа. -->
-        <pre>${esc(o.items.map(i=>`${i.name} × ${i.qty} — ${fmt(i.price*i.qty)}`).join('\n'))}
-Итого: ${fmt(o.total)}
-${esc(o.customer.name || '')}${o.customer.phone ? ' · '+esc(o.customer.phone) : ''}${o.user && o.user.username ? ' · @'+esc(o.user.username) : ''}${o.customer.address ? '\n'+esc(o.customer.address) : ''}</pre>
-      </div>`).join('')}
-    <button type="button" class="ghost" id="clearOrders" style="width:100%;margin-top:10px">Очистить историю</button>
-  ` : '<div class="empty">Заказов пока нет</div>';
-  const btn = $('clearOrders');
-  if(btn) btn.onclick = async () => {
-    if(!await confirmDialog('Удалить всю историю заказов? Отменить это будет нельзя.')) return;
+  await loadOrderPage(true);
+}
+
+async function loadOrderPage(reset){
+  let data;
+  try{
+    data = await api(`/api/admin/orders?status=${encodeURIComponent(orderFilter)}&offset=${orderOffset}&limit=${ORDER_PAGE}`);
+  }catch(e){
+    $('panel-orders').innerHTML = `<div class="empty">Не удалось загрузить: ${esc(e.message)}</div>`;
+    return;
+  }
+  orderMeta = data;
+  orders = reset ? data.items : orders.concat(data.items);
+  orderOffset = orders.length;
+  renderOrders();
+}
+
+function statusLabel(key){
+  const found = (orderMeta.statuses || []).find(s => s[0] === key);
+  return found ? found[1] : key;
+}
+
+function renderOrders(){
+  const counts = orderMeta.counts || {};
+  const totalAll = Object.values(counts).reduce((a,b)=>a+b,0);
+  const filters = [['', 'Все', totalAll]]
+    .concat((orderMeta.statuses||[]).map(([k,label]) => [k, label, counts[k] || 0]));
+
+  $('panel-orders').innerHTML = `
+    <div class="card">
+      <h2>Заказы</h2>
+      <div class="hint">История хранится целиком: последние в быстром доступе, остальные в архиве — фильтр и выгрузка видят и те, и другие.</div>
+      <div class="order-filters">
+        ${filters.map(([k,label,n]) =>
+          `<div class="ofilter ${k===orderFilter?'active':''}" data-st="${k}">${esc(label)}<b>${n}</b></div>`).join('')}
+      </div>
+      <div style="display:flex;gap:8px">
+        <button type="button" class="secondary" id="csvBtn" style="flex:1">Выгрузить CSV</button>
+        <button type="button" class="ghost" id="clearOrders" style="flex:0 0 auto">Очистить</button>
+      </div>
+    </div>
+    ${orders.length ? orders.map(orderCard).join('')
+      : `<div class="empty">${orderFilter ? 'Заказов с таким статусом нет' : 'Заказов пока нет'}</div>`}
+    ${orderMeta.hasMore ? `<button type="button" class="secondary" id="moreOrders" style="width:100%;margin-top:10px">Показать ещё</button>` : ''}
+  `;
+
+  $('panel-orders').querySelectorAll('[data-st]').forEach(el => el.onclick = () => {
+    orderFilter = el.dataset.st; orderOffset = 0; loadOrderPage(true);
+  });
+  $('panel-orders').querySelectorAll('[data-order-status]').forEach(sel => sel.onchange = () => changeOrderStatus(sel));
+  const more = $('moreOrders');
+  if(more) more.onclick = () => { more.disabled = true; more.textContent = 'Загружаю…'; loadOrderPage(false); };
+  $('csvBtn').onclick = () => exportOrdersCsv($('csvBtn'));
+  $('clearOrders').onclick = async () => {
+    if(!await confirmDialog('Удалить всю историю заказов, включая архив? Отменить это будет нельзя.')) return;
     await api('/api/admin/orders', { method:'DELETE' });
     buildOrders();
   };
+}
+
+function orderCard(o){
+  const c = o.customer || {};
+  // Всё, что пришло от покупателя, экранируем. Имя, телефон и адрес он
+  // вписывает сам, а раньше они шли в innerHTML сырыми: заказ с именем
+  // вида <img src=x onerror=...> выполнял произвольный скрипт прямо в
+  // админке, где в sessionStorage лежит токен доступа.
+  return `
+    <div class="order">
+      <div class="head">
+        <span><span class="st-dot st-${esc(o.status)}"></span> #${o.id}</span>
+        <span>${new Date(o.at).toLocaleString(settings.advanced.locale)}</span>
+      </div>
+      <pre>${esc((o.items||[]).map(i=>`${i.name} × ${i.qty} — ${fmt(i.price*i.qty)}`).join('\n'))}
+Итого: ${fmt(o.total)}
+${esc(c.name || '')}${c.phone ? ' · '+esc(c.phone) : ''}${o.user && o.user.username ? ' · @'+esc(o.user.username) : ''}${c.address ? '\n'+esc(c.address) : ''}</pre>
+      <div class="foot">
+        <select data-order-status="${o.id}">
+          ${(orderMeta.statuses||[]).map(([k,label]) =>
+            `<option value="${esc(k)}" ${k===o.status?'selected':''}>${esc(label)}</option>`).join('')}
+        </select>
+        ${o.paid ? '<span class="paid-tag">оплачен</span>' : ''}
+      </div>
+    </div>`;
+}
+
+async function changeOrderStatus(sel){
+  const id = Number(sel.dataset.orderStatus);
+  const prev = (orders.find(o => o.id === id) || {}).status;
+  sel.disabled = true;
+  try{
+    const r = await api('/api/admin/orders', { method:'PATCH', body: JSON.stringify({ id, status: sel.value }) });
+    const i = orders.findIndex(o => o.id === id);
+    if(i !== -1) orders[i] = r.order;
+    // счётчики в фильтрах поехали — обновляем их, не перезагружая список
+    orderMeta.counts[prev] = Math.max(0, (orderMeta.counts[prev] || 1) - 1);
+    orderMeta.counts[r.order.status] = (orderMeta.counts[r.order.status] || 0) + 1;
+    toast('Статус: ' + statusLabel(r.order.status));
+    // при активном фильтре заказ мог из него выпасть — перечитываем страницу
+    if(orderFilter){ orderOffset = 0; loadOrderPage(true); } else renderOrders();
+  }catch(e){
+    toast('Не удалось изменить статус: ' + e.message, true);
+    sel.value = prev;
+    sel.disabled = false;
+  }
+}
+
+// CSV качаем через fetch, а не ссылкой: файл лежит за админ-токеном,
+// а токен передаётся заголовком, которого у обычной ссылки нет.
+async function exportOrdersCsv(btn){
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Готовлю…';
+  try{
+    const res = await fetch('/api/admin/orders/export.csv', { headers:{ 'x-admin-token': TOKEN } });
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `orders-${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }catch(e){ toast('Не удалось выгрузить: ' + e.message, true); }
+  btn.disabled = false;
+  btn.textContent = original;
 }
 
 /* ==================== ТОВАРЫ ==================== */

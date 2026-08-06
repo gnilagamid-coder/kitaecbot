@@ -45,8 +45,11 @@ const PROVIDERS = {
         id,
         paymentDetails: { amount: Number(order.total), currency: ctx.currencyCode || 'RUB' },
         description: `Заказ №${order.id}`.slice(0, 120),
-        return: `${ctx.publicUrl}/?paid=${order.id}`,
-        failedUrl: `${ctx.publicUrl}/?failed=${order.id}`,
+        // Ключ в адресе возврата нужен витрине, чтобы спросить у нас настоящий
+        // статус оплаты. Сам по себе редирект ничего не доказывает: покупатель
+        // может закрыть страницу мерчанта и всё равно попасть сюда.
+        return: `${ctx.publicUrl}/?paid=${order.id}&t=${encodeURIComponent(ctx.returnToken || '')}`,
+        failedUrl: `${ctx.publicUrl}/?failed=${order.id}&t=${encodeURIComponent(ctx.returnToken || '')}`,
         payload: String(order.id),
       });
 
