@@ -1,6 +1,7 @@
-// Админка как Mini App из бота: страница не отдаётся обычному браузеру,
-// вход — по initData Telegram для chat_id из ADMIN_CHAT_IDS, вместо вечного
-// ADMIN_TOKEN страница получает подписанный билет на 30 дней.
+// Админка как Mini App из бота: вход — по initData Telegram для chat_id из
+// ADMIN_CHAT_IDS, вместо вечного ADMIN_TOKEN страница получает подписанный
+// билет на 30 дней. Аварийный вход — токен в поле формы, а не в URL
+// (query-строки оседают в access-логах nginx и истории браузера).
 // Сквозной тест на живом сервере (схема smoke.test.js). Сеть к Telegram
 // не нужна: подпись initData считается локально тем же алгоритмом.
 
@@ -78,20 +79,24 @@ test.after(() => {
   fs.rmSync(DATA_DIR, { recursive: true, force: true });
 });
 
-test('страница админки браузеру не отдаётся', async () => {
+test('страница админки — лишь форма входа, токен в URL не участвует', async () => {
+  // Страница доступна и браузеру, и Telegram: секретов в ней нет,
+  // вся защита — на API. Раньше браузеру без ?token= приходил 404.
   const browser = await fetch(BASE + '/admin.html', { headers: { 'User-Agent': BROWSER_UA } });
-  assert.strictEqual(browser.status, 404, 'прямой заход из браузера закрыт');
+  assert.strictEqual(browser.status, 200, 'форма входа открывается из браузера');
+  assert.match(await browser.text(), /Вход в админку/);
 
   const tg = await fetch(BASE + '/admin.html', { headers: { 'User-Agent': TG_UA } });
   assert.strictEqual(tg.status, 200, 'внутри Telegram WebApp страница открывается');
-  assert.match(await tg.text(), /Вход в админку/);
 
-  // аварийный вход по ADMIN_TOKEN в адресе — работает даже из браузера
-  const emergency = await fetch(`${BASE}/admin.html?token=${encodeURIComponent(TOKEN)}`, { headers: { 'User-Agent': BROWSER_UA } });
-  assert.strictEqual(emergency.status, 200);
+  // ?token= в адресе больше ничего не решает: страница отдаётся та же самая,
+  // а токен вводится только в поле формы и в логи/историю не попадает.
+  const legacy = await fetch(`${BASE}/admin.html?token=${encodeURIComponent(TOKEN)}`, { headers: { 'User-Agent': BROWSER_UA } });
+  assert.strictEqual(legacy.status, 200);
 
-  const wrong = await fetch(`${BASE}/admin.html?token=мимо`, { headers: { 'User-Agent': BROWSER_UA } });
-  assert.strictEqual(wrong.status, 404);
+  // Настоящая защита на месте: API без токена закрыт.
+  // (эта 401 учитывается счётчиком authguard — тесты дальше это допускают)
+  assert.strictEqual((await api('/api/admin/stats')).status, 401);
 
   // витрина при этом открыта всем
   assert.strictEqual((await fetch(BASE + '/index.html', { headers: { 'User-Agent': BROWSER_UA } })).status, 200);

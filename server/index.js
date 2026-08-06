@@ -420,19 +420,11 @@ async function serveStatic(req, res, urlPath) {
   const full = path.join(PUBLIC_DIR, path.normalize(rel).replace(/^(\.\.[/\\])+/, ''));
   if (!full.startsWith(PUBLIC_DIR)) { res.writeHead(403); return res.end('forbidden'); }
 
-  // Админка переехала в бота: обычному браузеру страница не отдаётся.
-  // Исключений два — открыто внутри Telegram WebApp либо аварийный вход
-  // ?token=<ADMIN_TOKEN> (для обслуживания, в документации не светится).
-  // Настоящая защита всё равно на API: страница без токена ничего не может.
-  if (rel === '/admin.html') {
-    const inTelegram = /Telegram/i.test(String(req.headers['user-agent'] || ''));
-    const q = new URL(req.url, 'http://localhost').searchParams;
-    if (!inTelegram && !tokenOk(req, String(q.get('token') || ''))) {
-      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-      return res.end('404');
-    }
-  }
-
+  // Админка живёт в боте, но саму страницу не прячем: она лишь форма входа и
+  // никаких секретов не содержит, вся настоящая защита — на API (токен +
+  // authguard). Раньше аварийный вход шёл через ?token=<ADMIN_TOKEN> в адресе,
+  // но query-строки оседают в access-логах nginx и истории браузера. Теперь
+  // токен вводится только в поле формы и в URL не попадает никогда.
   try {
     const stat = await fsp.stat(full);
     if (stat.isDirectory()) throw new Error('dir');

@@ -127,6 +127,17 @@ server {
     # админка отдаёт токен в заголовке, а картинки могут быть тяжёлыми
     client_max_body_size 12m;
 
+    # Вход в админку: страница — лишь форма, но на всякий случай не пишем
+    # этот путь в access-лог (защита от случайных секретов в query-строке).
+    location = /admin.html {
+        access_log off;
+        proxy_pass http://127.0.0.1:${PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:${PORT};
         proxy_set_header Host \$host;
@@ -163,7 +174,8 @@ cat <<EOF
   Витрина:  ${PUBLIC_URL}/
   Админка:  в боте команда /admin (сначала впишите свой chat_id
             в ${APP_DIR}/.env: ADMIN_CHAT_IDS=<id>, узнать: /id у бота)
-  Аварийный вход: ${PUBLIC_URL}/admin.html?token=${ADMIN_TOKEN}
+  Аварийный вход: ${PUBLIC_URL}/admin.html — токен вводится в поле формы,
+            в URL он не пишется и в логи не попадает
   Пароль:   ${ADMIN_TOKEN}
 
   Осталось в @BotFather:

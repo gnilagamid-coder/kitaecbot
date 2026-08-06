@@ -1,5 +1,5 @@
-# Smoke-тест merge/stage-1-tenant-context на копии данных (data-smoke).
-# Ничего не трогает в data/ — только читает API на 127.0.0.1:3999.
+# Smoke test over the data-smoke copy. Reads API at 127.0.0.1:3999 only.
+# ASCII-only on purpose: PS 5.1 misreads UTF-8 Cyrillic in scripts.
 $ErrorActionPreference = 'Stop'
 $base = 'http://127.0.0.1:3999'
 $envFile = Join-Path $PSScriptRoot '.env'
@@ -11,49 +11,44 @@ function Check($name, $cond) {
     else       { Write-Host "FAIL $name"; $script:fail++ }
 }
 
-# 1. Витрина: публичный список товаров
+# 1. Storefront: public product list
 try {
     $products = Invoke-RestMethod "$base/api/products" -TimeoutSec 5
-    Check "витрина отдаёт товары (count=$($products.Count))" ($products.Count -gt 0)
-    Check "скрытые товары не попадают в витрину" (($products | Where-Object { $_.hidden }) -eq $null -or @($products | Where-Object { $_.hidden }).Count -eq 0)
-} catch { Check "витрина отдаёт товары" $false }
+    Check "products served (count=$($products.Count))" ($products.Count -gt 0)
+    Check "hidden products not exposed" (@($products | Where-Object { $_.hidden }).Count -eq 0)
+} catch { Check "products served" $false }
 
-# 2. Админка: авторизация только через заголовок x-admin-token (логин-эндпоинта нет)
+# 2. Admin auth is x-admin-token header only (no login endpoint)
 $h = @{ 'x-admin-token' = $adminToken }
 
-# 3. Админка: товары, заказы, статистика
+# 3. Admin: products, orders, stats
 try {
     $admProducts = Invoke-RestMethod "$base/api/admin/products" -Headers $h -TimeoutSec 5
-    Check "админ видит товары (count=$($admProducts.Count))" ($admProducts.Count -gt 0)
+    Check "admin products (count=$($admProducts.Count))" ($admProducts.Count -gt 0)
 
     $orders = Invoke-RestMethod "$base/api/admin/orders" -Headers $h -TimeoutSec 5
-    Check "заказы читаются" ($orders -ne $null)
+    Check "orders readable" ($orders -ne $null)
 
     $stats = Invoke-RestMethod "$base/api/admin/stats" -Headers $h -TimeoutSec 5
-    Check "статистика отдаётся" ($stats -ne $null)
-} catch { Check "админские эндпоинты ($($_.Exception.Message))" $false }
+    Check "stats served" ($stats -ne $null)
+} catch { Check "admin endpoints ($($_.Exception.Message))" $false }
 
-# 4. Неверный токен отвергается
+# 4. Wrong token rejected
 try {
     $bad = Invoke-WebRequest "$base/api/admin/products" -Headers @{ 'x-admin-token' = 'wrong-token-123' } -TimeoutSec 5 -ErrorAction Stop
-    Check "неверный токен отвергается" $false
+    Check "wrong token rejected" $false
 } catch {
-    Check "неверный токен отвергается (status=$($_.Exception.Response.StatusCode.value__))" ([int]$_.Exception.Response.StatusCode -ge 400)
+    Check "wrong token rejected (status=$($_.Exception.Response.StatusCode.value__))" ([int]$_.Exception.Response.StatusCode -ge 400)
 }
 
-# 5. Статика Mini App и админки (админка живёт в боте: браузеру без токена закрыта)
+# 5. Static: mini app + admin login form (admin lives in the bot; emergency
+# token is typed into the form field and never appears in the URL)
 try {
     $idx = Invoke-WebRequest "$base/" -TimeoutSec 5
-    $adm = Invoke-WebRequest "$base/admin.html?token=$adminToken" -TimeoutSec 5
-    Check "витрина / отдаётся" ($idx.StatusCode -eq 200)
-    Check "админка отдаётся с аварийным токеном" ($adm.StatusCode -eq 200)
-} catch { Check "статика отдаётся ($($_.Exception.Message))" $false }
-try {
-    $null = Invoke-WebRequest "$base/admin.html" -TimeoutSec 5 -ErrorAction Stop
-    Check "админка браузеру без токена закрыта" $false
-} catch {
-    Check "админка браузеру без токена закрыта (404)" ([int]$_.Exception.Response.StatusCode -eq 404)
-}
+    $adm = Invoke-WebRequest "$base/admin.html" -TimeoutSec 5
+    Check "storefront / served" ($idx.StatusCode -eq 200)
+    Check "admin.html served as login form (no token in URL)" ($adm.StatusCode -eq 200)
+} catch { Check "static served ($($_.Exception.Message))" $false }
 
 Write-Host ""
 Write-Host "Smoke: $pass ok, $fail fail"

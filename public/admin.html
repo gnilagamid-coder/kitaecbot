@@ -258,7 +258,7 @@
 
 <div class="login" id="loginBox">
   <h1>Вход в админку</h1>
-  <div class="hint" style="margin-bottom:10px">Панель открывается из бота: команда /admin → «⚙️ Открыть панель».<br>Внутри Telegram вход для владельца происходит сам.</div>
+  <div class="hint" style="margin-bottom:10px">Панель открывается из бота: команда /admin → «⚙️ Открыть панель».<br>Внутри Telegram вход для владельца происходит сам.<br>Аварийный вход из браузера — введите админ-токен в поле ниже.</div>
   <input type="password" id="tokenInput" placeholder="Админ-токен" autocomplete="current-password">
   <button id="loginBtn">Войти</button>
   <div class="err" id="loginErr"></div>
@@ -2013,11 +2013,10 @@ async function tgAutoLogin(){
   return false;
 }
 
-// Порядок входа: ?token= в адресе (аварийный) → сохранённый в сессии →
-// автологин по initData Telegram → форма ручного входа как запасная.
+// Порядок входа: сохранённый в сессии токен → автологин по initData Telegram
+// → форма ручного входа. Аварийный токен вводится только в поле формы:
+// в URL он никогда не пишется, чтобы не оседать в логах и истории браузера.
 (async function boot(){
-  const urlToken = new URLSearchParams(location.search).get('token');
-  if(urlToken){ TOKEN = urlToken; if(await init()) return; }
   try{
     const saved = sessionStorage.getItem('admin_token');
     if(saved){ TOKEN = saved; if(await init()) return; }
