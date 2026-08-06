@@ -20,3 +20,6 @@ design/fonts-local.css
 design/*.ps1
 .claude/
 avito/
+
+# локальные архивы для переноса
+*.rar
