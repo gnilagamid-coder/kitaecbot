@@ -398,6 +398,7 @@
   <div class="panel" id="panel-products"></div>
   <div class="panel" id="panel-orders"></div>
   <div class="panel" id="panel-backup"></div>
+  <div class="panel" id="panel-billing"></div>
   <div class="panel" id="panel-advanced"></div>
 </div>
 
@@ -744,6 +745,7 @@ function buildPanel(id){
   if(id === 'products')  return buildProducts();
   if(id === 'orders')    return buildOrders();
   if(id === 'backup')    return buildBackup();
+  if(id === 'billing')   return buildBilling();
   if(id === 'brand'){
     renderPanel('panel-brand', PANEL_BRAND());
     renderLogoPreview();
@@ -1391,6 +1393,51 @@ async function downloadBackup(name){
     a.click();
     setTimeout(()=> URL.revokeObjectURL(a.href), 30000);
   } catch(e){ toast('Не удалось скачать: ' + e.message, true); }
+}
+
+// ---------- Подписка (биллинг платформы) ----------
+// Опционально: без настроенной Robokassa платформа отвечает enabled:false,
+// и вкладка просто не появляется. Подписка — это плата за работу магазина
+// на платформе; приём денег от покупателей живёт во вкладке «Оплата» и от
+// подписки не зависит.
+let billingInfo = null;
+async function loadBilling(){
+  try { billingInfo = await api('/api/admin/billing'); } catch(e){ billingInfo = null; }
+  if(billingInfo && billingInfo.enabled && !TABS.some(t => t[0] === 'billing')) TABS.push(['billing','Подписка']);
+}
+function fmtBillDate(v){
+  if(!v) return '—';
+  try { return new Date(v).toLocaleDateString('ru-RU', { day:'numeric', month:'long', year:'numeric' }); }
+  catch(e){ return '—'; }
+}
+async function buildBilling(){
+  const panel = $('panel-billing');
+  let b = billingInfo;
+  try { b = await api('/api/admin/billing'); billingInfo = b; } catch(e){ /* остаёмся с кэшем */ }
+  if(!b || !b.enabled){
+    panel.innerHTML = '<div class="card"><div class="empty">Биллинг не настроен — магазин работает бесплатно</div></div>';
+    return;
+  }
+  const state = { trial:'Пробный период', active:'Подписка активна', overdue:'Подписка просрочена' }[b.state] || b.state;
+  const stateColor = b.state === 'overdue' ? 'var(--danger)' : 'var(--accent-2)';
+  const until = b.state === 'trial' ? fmtBillDate(b.trialUntil) : fmtBillDate(b.paidUntil);
+  panel.innerHTML = `
+    <div class="card">
+      <h2>Подписка</h2>
+      <div class="hint">Плата за работу магазина на платформе. Приём заказов и оплата
+        от покупателей настраиваются отдельно во вкладке «Оплата» и от подписки не зависят.</div>
+      <div class="field"><label>Статус</label><div style="font-weight:600;color:${stateColor}">${esc(state)}</div></div>
+      <div class="field"><label>${b.state === 'trial' ? 'Пробный период до' : 'Оплачено до'}</label><div>${until}</div></div>
+      <div class="field"><label>Тариф</label><div>${fmt(b.price)} за ${b.periodDays} дней</div></div>
+      <button type="button" id="billPay" style="width:100%;margin-top:6px">${b.state === 'active' ? 'Продлить подписку' : 'Оплатить подписку'}</button>
+    </div>`;
+  $('billPay').onclick = async () => {
+    $('billPay').disabled = true;
+    try {
+      const inv = await api('/api/admin/billing/pay', { method:'POST' });
+      window.location.href = inv.url; // уходим на кассу Robokassa
+    } catch(e){ toast('Не удалось выставить счёт: ' + e.message, true); $('billPay').disabled = false; }
+  };
 }
 
 // ---------- Обзор ----------
@@ -2075,6 +2122,14 @@ async function init(){
   // тему витрины здесь НЕ применяем: за неё отвечает живое превью, а админка
   // рисуется собственной темой (applyAdminTheme при загрузке страницы)
   setCurrency({ symbol: settings.commerce.currency, position: settings.commerce.currencyPosition, locale: settings.advanced.locale });
+
+  // Вкладка «Подписка» появляется только при включённом биллинге платформы.
+  await loadBilling();
+  // Возврат с кассы: ?paid=1 / ?payfail=1 ставит редирект платформы.
+  const qp = new URLSearchParams(location.search);
+  if(qp.get('paid'))    toast('Оплата получена — подписка продлена');
+  if(qp.get('payfail')) toast('Оплата не прошла — попробуйте ещё раз', true);
+  if((qp.get('paid') || qp.get('payfail')) && TABS.some(t => t[0] === 'billing')) activeTab = 'billing';
 
   renderTabs();
   selectTab(activeTab);

@@ -24,6 +24,7 @@ let available = false;
 const TABLES = [
   'schema_migrations', 'tenants', 'shops', 'shop_settings', 'products',
   'product_images', 'images', 'orders', 'order_items', 'product_views', 'shop_docs',
+  'invoices', 'subscriptions',
 ];
 
 test.before(async () => {
@@ -54,7 +55,7 @@ const skip = t => { if (!available) { t.skip('MySQL недоступен'); retu
 test('up() создаёт всю схему и фиксирует миграцию', async t => {
   if (skip(t)) return;
   const applied = await migrator.up();
-  assert.deepStrictEqual(applied, ['0001_core.sql', '0002_shop_docs.sql']);
+  assert.deepStrictEqual(applied, ['0001_core.sql', '0002_shop_docs.sql', '0003_billing.sql']);
 
   const [rows] = await db.query('SHOW TABLES');
   const tables = rows.map(r => Object.values(r)[0]).sort();
@@ -68,6 +69,7 @@ test('повторный up() ничего не применяет (идемпо
   assert.deepStrictEqual(status, [
     { name: '0001_core.sql', state: 'applied' },
     { name: '0002_shop_docs.sql', state: 'applied' },
+    { name: '0003_billing.sql', state: 'applied' },
   ]);
 });
 

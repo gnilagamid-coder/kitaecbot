@@ -49,7 +49,7 @@ function createRegistry(db) {
   async function findShopBySubdomain(subdomain) {
     const [rows] = await db.query(
       `SELECT s.id AS shop_id, s.subdomain, s.title, s.bot_token_enc, s.admin_token_hash,
-              s.admin_chat_ids, s.status, s.tenant_id,
+              s.admin_chat_ids, s.status, s.created_at, s.tenant_id,
               t.slug AS tenant_slug, t.name AS tenant_name, t.email AS tenant_email
          FROM shops s JOIN tenants t ON t.id = s.tenant_id
         WHERE s.subdomain = ?`,
@@ -62,6 +62,17 @@ function createRegistry(db) {
       `SELECT s.id AS shop_id, s.subdomain, s.title, s.status
          FROM shops s
         WHERE s.status IN ('active', 'provisioning')
+        ORDER BY s.id`);
+    return rows;
+  }
+
+  // Кого поднимать при старте платформы: активные + приостановленные —
+  // последним админка нужна, чтобы продлить подписку и вернуться.
+  async function listBootShops() {
+    const [rows] = await db.query(
+      `SELECT s.id AS shop_id, s.subdomain, s.title, s.status
+         FROM shops s
+        WHERE s.status IN ('active', 'provisioning', 'suspended')
         ORDER BY s.id`);
     return rows;
   }
@@ -83,7 +94,7 @@ function createRegistry(db) {
     db,
     validateSubdomain,
     createTenant, createShop,
-    findShopBySubdomain, listActiveShops,
+    findShopBySubdomain, listActiveShops, listBootShops,
     setShopStatus, setBotToken, countShops,
   };
 }

@@ -977,6 +977,23 @@ async function handleApi(req, res, url) {
       }
     }
 
+    // Подписка магазина на платформу (Stage 5). Только режим платформы и
+    // только при настроенной Robokassa; иначе enabled:false и оплата ни на
+    // что не влияет. Приём денег от покупателей — отдельно, в payments.js.
+    if (p === '/api/admin/billing' && method === 'GET') {
+      if (!billing) return json(res, 200, { enabled: false });
+      const row = await registry.findShopBySubdomain(currentTenant().subdomain);
+      return json(res, 200, await billing.statusForShop(row));
+    }
+    if (p === '/api/admin/billing/pay' && method === 'POST') {
+      if (!billing) return json(res, 400, { error: 'биллинг не настроен' });
+      const row = await registry.findShopBySubdomain(currentTenant().subdomain);
+      try {
+        const inv = await billing.createInvoice(row);
+        return json(res, 200, inv);
+      } catch (e) { return json(res, e.status || 500, { error: e.message }); }
+    }
+
     if (p === '/api/admin/products') {
       let products = store.read('products', []);
 
@@ -1327,6 +1344,7 @@ function normalizeProduct(b) {
 // MULTI_ROOT. В файловом режиме вся секция молчит: переменные пусты.
 let registry = null;
 let platformDb = null;
+let billing = null; // подписка магазинов; null до bootPlatform
 const tenantsBySub = new Map(); // subdomain -> tenant
 
 // Собирает арендатора из строки реестра. Данные магазина живут в MySQL
@@ -1367,12 +1385,15 @@ async function buildTenantFromRow(row) {
   t.subdomain = row.subdomain;
   t.shopId = row.shop_id;
   t.status = row.status;
+  t.createdAt = row.created_at || null;
   // Данные в БД — снимки папки не применяются; интерфейс у заглушки тот же.
   t.backup = createDisabledBackup('данные магазина в MySQL — снимки папки не применяются');
   return t;
 }
 
 // shop1.example.ru -> арендатор shop1; www/голый домен -> null (это платформа).
+// Статус здесь не фильтр: приостановленный магазин тоже резолвится, чтобы
+// отдать 402 витрине и пустить продавца в админку за продлением.
 function resolveTenantByHost(hostRaw) {
   if (!MULTI_DOMAIN) return null;
   const host = String(hostRaw || '').toLowerCase().split(':')[0];
@@ -1380,7 +1401,7 @@ function resolveTenantByHost(hostRaw) {
   const sub = host.slice(0, -(MULTI_DOMAIN.length + 1));
   if (!sub || sub.includes('.')) return null;
   const t = tenantsBySub.get(sub);
-  return t && t.status === 'active' ? t : null;
+  return t && t.status !== 'deleted' ? t : null;
 }
 
 function isPlatformHost(hostRaw) {
@@ -1439,6 +1460,35 @@ async function handlePlatform(req, res, url) {
     });
   }
 
+  // Result-уведомление Robokassa: ответ строго текстом «OK<InvId>», иначе
+  // платёжка шлёт уведомление повторно. GET и POST — касса ходит обоими,
+  // в POST параметры приходят form-encoded в теле.
+  if (url.pathname === '/api/platform/billing/result') {
+    if (!billing) return json(res, 404, { error: 'биллинг не настроен' });
+    const params = Object.fromEntries(url.searchParams);
+    if (method === 'POST') {
+      const chunks = [];
+      for await (const c of req) { chunks.push(c); if (Buffer.concat(chunks).length > 64 * 1024) break; }
+      Object.assign(params, Object.fromEntries(new URLSearchParams(Buffer.concat(chunks).toString('utf8'))));
+    }
+    const r = await billing.handleResult(params);
+    if (!r.ok) return json(res, r.status, { error: r.error });
+    if (r.subdomain) await syncShopAfterPay(r.subdomain);
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end(`OK${r.invId}`);
+  }
+
+  // Редиректы продавца после кассы — обратно в его админку.
+  if (url.pathname === '/api/platform/billing/success' || url.pathname === '/api/platform/billing/fail') {
+    const paid = url.pathname.endsWith('success');
+    const sub = billing ? await billing.redirectFor(Object.fromEntries(url.searchParams)) : null;
+    const target = sub
+      ? `https://${sub}.${MULTI_DOMAIN}/admin.html?${paid ? 'paid=1' : 'payfail=1'}`
+      : `https://${MULTI_DOMAIN}/`;
+    res.writeHead(302, { Location: target });
+    return res.end();
+  }
+
   return json(res, 404, { error: 'unknown platform endpoint' });
 }
 
@@ -1455,20 +1505,80 @@ function servePlatform(res, url) {
   return json(res, 404, { error: 'not found' });
 }
 
+// Оплата прошла: магазин уже active в БД (делает billing), здесь синхроним
+// кэш роутера и возвращаем бота в эфир.
+async function syncShopAfterPay(subdomain) {
+  const t = tenantsBySub.get(subdomain);
+  if (t && t.status !== 'active') {
+    t.status = 'active';
+    try { t.bot.start(); } catch (e) { console.error(`[platform] ${subdomain}: бот не поднялся после оплаты: ${e.message}`); }
+  }
+}
+
+// Приостановленный магазин: витрина закрыта (402), админка и оплата доступны.
+function serveSuspended(res, url) {
+  if (url.pathname === '/' || url.pathname === '/index.html') {
+    const html = '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
+      + '<meta name="viewport" content="width=device-width, initial-scale=1">'
+      + '<title>Магазин приостановлен</title></head>'
+      + '<body style="font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f4f4f7;color:#222">'
+      + '<div style="max-width:420px;padding:28px;border-radius:20px;background:#fff;box-shadow:0 8px 32px rgba(0,0,0,.08);text-align:center">'
+      + '<h1 style="font-size:20px;margin:0 0 12px">Магазин приостановлен</h1>'
+      + '<p style="margin:0 0 16px;color:#555">Не оплачена подписка на платформу. Откройте админку и продлите доступ — витрина сразу вернётся.</p>'
+      + '<a href="/admin.html" style="display:inline-block;padding:10px 22px;border-radius:14px;background:#0a84ff;color:#fff;text-decoration:none;font-weight:600">Войти в админку</a>'
+      + '</div></body></html>';
+    res.writeHead(402, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(html);
+  }
+  return json(res, 402, { error: 'магазин приостановлен: не оплачена подписка, войдите в админку' });
+}
+
+// Пути, которые остаются доступны приостановленному магазину: админка и её
+// статика — чтобы продавец мог войти и оплатить продление.
+function suspendedAllowed(p) {
+  return p === '/admin.html' || p.startsWith('/api/admin/')
+    || p === '/shared.js' || p === '/theme-core.js' || p === '/favicon.ico';
+}
+
 // Поднимает реестр и всех зарегистрированные магазины. Вызывается в listen:
 // пара запросов в окно загрузки получат «магазин не найден» — это нормально.
 async function bootPlatform() {
   const { createDb, dbConfigFromEnv } = require('./db');
   const { createMigrator } = require('./migrations');
   const { createRegistry } = require('./registry');
+  const { createBilling } = require('./billing');
   platformDb = createDb(dbConfigFromEnv());
   await createMigrator({ db: platformDb }).up(); // платформа всегда на последней схеме
   registry = createRegistry(platformDb);
-  const rows = await registry.listActiveShops();
+
+  // Биллинг опционален: без ROBOKASSA_LOGIN/паролей магазины работают бесплатно.
+  billing = createBilling({
+    db: platformDb, registry,
+    cfg: {
+      login: process.env.ROBOKASSA_LOGIN || '',
+      pass1: process.env.ROBOKASSA_PASS1 || '',
+      pass2: process.env.ROBOKASSA_PASS2 || '',
+      isTest: String(process.env.ROBOKASSA_IS_TEST || '').trim() === '1',
+      price: Number(process.env.BILLING_PRICE) || 990,
+      periodDays: Number(process.env.BILLING_PERIOD_DAYS) || 30,
+      trialDays: process.env.BILLING_TRIAL_DAYS === '' ? 0 : (Number(process.env.BILLING_TRIAL_DAYS) || 14),
+      platformBaseUrl: `https://${MULTI_DOMAIN}`,
+    },
+  });
+
+  const rows = await registry.listBootShops();
   for (const row of rows) {
-    if (row.status !== 'active') continue;
+    if (row.status === 'deleted') continue;
     const full = await registry.findShopBySubdomain(row.subdomain);
     tenantsBySub.set(row.subdomain, await buildTenantFromRow(full));
+  }
+
+  // Просроченные подписки -> suspended. Биллинг выключен — вызов безвреден.
+  const suspended = await billing.enforce();
+  for (const s of suspended) {
+    const t = tenantsBySub.get(s.subdomain);
+    if (t) t.status = 'suspended';
+    console.log(`[billing] магазин ${s.subdomain} приостановлен: подписка просрочена`);
   }
 }
 
@@ -1484,6 +1594,10 @@ const server = http.createServer(async (req, res) => {
       }
       const t = resolveTenantByHost(req.headers.host);
       if (!t) return json(res, 404, { error: `магазин не найден — зарегистрируйтесь на ${MULTI_DOMAIN}` });
+      // Подписка просрочена: витрина закрыта, админка — нет (там оплата).
+      if (t.status !== 'active' && !suspendedAllowed(url.pathname)) {
+        return serveSuspended(res, url);
+      }
       // Весь дальнейший код запроса видит «своего» арендатора через als.
       return await als.run({ tenant: t }, async () => {
         if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
@@ -1507,8 +1621,24 @@ server.listen(PORT, HOST, async () => {
       console.error('[platform] старт не удался:', e.message);
       process.exit(1);
     }
-    console.log(`[platform] http://${HOST}:${PORT}  (домен: ${MULTI_DOMAIN}, магазинов: ${tenantsBySub.size}, данные: ${MULTI_ROOT})`);
-    for (const t of tenantsBySub.values()) { t.bot.start(); t.backup.start(); }
+    console.log(`[platform] http://${HOST}:${PORT}  (домен: ${MULTI_DOMAIN}, магазинов: ${tenantsBySub.size}, данные: ${MULTI_ROOT}${billing && billing.enabled ? ', биллинг: Robokassa' : ', биллинг: выключен'})`);
+    // Боты и бэкапы — только активным; приостановленные ждут оплаты.
+    for (const t of tenantsBySub.values()) {
+      if (t.status !== 'active') continue;
+      t.bot.start();
+      t.backup.start();
+    }
+    // Раз в час проверяем просрочки: billing сам вернёт [], если выключен.
+    setInterval(async () => {
+      try {
+        const list = await billing.enforce();
+        for (const s of list) {
+          const t = tenantsBySub.get(s.subdomain);
+          if (t) { t.status = 'suspended'; t.bot.stop(); }
+          console.log(`[billing] магазин ${s.subdomain} приостановлен: подписка просрочена`);
+        }
+      } catch (e) { console.error('[billing] enforce:', e.message); }
+    }, 60 * 60 * 1000);
   } else {
     console.log(`[web] http://${HOST}:${PORT}  (данные: ${solo.store.DATA_DIR})`);
     solo.bot.start();
