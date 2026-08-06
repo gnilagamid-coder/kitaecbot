@@ -290,6 +290,7 @@
   <div class="panel" id="panel-channel"></div>
   <div class="panel" id="panel-products"></div>
   <div class="panel" id="panel-orders"></div>
+  <div class="panel" id="panel-backup"></div>
   <div class="panel" id="panel-advanced"></div>
 </div>
 
@@ -596,7 +597,7 @@ function renderLines(box, path){
 const TABS = [
   ['dashboard','Обзор'], ['brand','Бренд'], ['theme','Тема'], ['catalog','Каталог'],
   ['commerce','Продажи'], ['checkout','Форма заказа'], ['payments','Оплата'], ['promo','Промокоды'], ['notify','Уведомления'],
-  ['bot','Бот'], ['channel','Канал'], ['products','Товары'], ['orders','Заказы'], ['advanced','Ещё'],
+  ['bot','Бот'], ['channel','Канал'], ['products','Товары'], ['orders','Заказы'], ['backup','Бэкапы'], ['advanced','Ещё'],
 ];
 let activeTab = 'dashboard';
 
@@ -631,6 +632,7 @@ function buildPanel(id){
   if(id === 'dashboard') return buildDashboard();
   if(id === 'products')  return buildProducts();
   if(id === 'orders')    return buildOrders();
+  if(id === 'backup')    return buildBackup();
   if(id === 'brand'){
     renderPanel('panel-brand', PANEL_BRAND());
     renderLogoPreview();
@@ -1177,6 +1179,107 @@ function buildAdvanced(){
       await init();
     }catch(err){ toast('Не удалось импортировать: ' + err.message, true); }
   };
+}
+
+// ---------- Бэкапы ----------
+// Конфиг бэкапов живёт на сервере отдельно от настроек магазина, поэтому
+// здесь свои контролы с прямым PUT /api/admin/backup, а не поля F.* через savebar.
+function fmtBytes(n){
+  if(!Number.isFinite(n)) return '—';
+  if(n < 1024) return n + ' Б';
+  if(n < 1048576) return (n/1024).toFixed(1) + ' КБ';
+  return (n/1048576).toFixed(1) + ' МБ';
+}
+
+async function buildBackup(){
+  const panel = $('panel-backup');
+  panel.innerHTML = '<div class="card"><div class="empty">Загружаю…</div></div>';
+  let data;
+  try { data = await api('/api/admin/backup'); }
+  catch(e){ panel.innerHTML = `<div class="card"><div class="empty">Не удалось загрузить: ${esc(e.message)}</div></div>`; return; }
+  const cfg = data.config || {};
+  const snaps = data.snapshots || [];
+  const last = cfg.lastRunAt ? new Date(cfg.lastRunAt).toLocaleString('ru-RU') : 'ещё не было';
+
+  panel.innerHTML = `
+    <div class="card">
+      <h2>Автобэкап</h2>
+      <div class="hint">Снимается вся папка данных: настройки, товары, заказы и картинки.
+        Копии хранятся на сервере (папка backups/). Периодически скачивайте свежие снимки:
+        диск сервера — не единственная точка, которой стоит доверять.</div>
+      <div class="switch"><div class="lbl">Делать снимки автоматически<small>по расписанию, вручную запускать не нужно</small></div>
+        <div class="switch-track ${cfg.enabled?'on':''}" id="bkEnabled"><div class="switch-thumb"></div></div></div>
+      <div class="field"><label>Интервал</label>
+        <select id="bkInterval">
+          ${[[6,'Каждые 6 часов'],[12,'Каждые 12 часов'],[24,'Раз в сутки'],[72,'Раз в 3 дня'],[168,'Раз в неделю']]
+            .map(([v,l])=>`<option value="${v}" ${cfg.intervalHours===v?'selected':''}>${l}</option>`).join('')}
+        </select></div>
+      <div class="field"><label>Сколько копий хранить</label>
+        <input type="number" id="bkRetention" value="${cfg.retention}" min="1" max="100">
+        <div class="sub">Старые снимки удаляются автоматически. Последний снимок: ${esc(last)}</div></div>
+      <button type="button" class="secondary" id="bkRun" style="width:100%;margin-top:6px">Сделать снимок сейчас</button>
+    </div>
+    <div class="card">
+      <h2>Снимки (${snaps.length})</h2>
+      ${snaps.length ? snaps.map(s=>`
+        <div class="rowitem" style="align-items:center">
+          <div style="flex:1;min-width:130px">
+            <b>${esc(s.name)}</b>${s.broken ? ' <span style="color:#c0392b">⚠ испорчен</span>' : ''}
+            <div class="sub" style="margin:0">${s.createdAt ? new Date(s.createdAt).toLocaleString('ru-RU') : '—'} · файлов: ${s.files} · ${fmtBytes(s.size)}</div>
+          </div>
+          <button type="button" class="ghost" data-bk-dl="${esc(s.name)}">Скачать</button>
+          <button type="button" class="ghost" data-bk-rs="${esc(s.name)}">Восстановить</button>
+          <button type="button" class="ghost" data-bk-rm="${esc(s.name)}">✕</button>
+        </div>`).join('')
+      : '<div class="empty">Снимков ещё нет — нажмите «Сделать снимок сейчас»</div>'}
+    </div>`;
+
+  const saveCfg = async patch => {
+    try { await api('/api/admin/backup', { method:'PUT', body: JSON.stringify(patch) }); toast('Сохранено'); }
+    catch(e){ toast('Не удалось сохранить: ' + e.message, true); }
+  };
+  $('bkEnabled').onclick = () => {
+    const on = !$('bkEnabled').classList.contains('on');
+    $('bkEnabled').classList.toggle('on', on);
+    saveCfg({ enabled: on });
+  };
+  $('bkInterval').onchange = () => saveCfg({ intervalHours: Number($('bkInterval').value) });
+  $('bkRetention').onchange = () => saveCfg({ retention: Number($('bkRetention').value) });
+  $('bkRun').onclick = async () => {
+    $('bkRun').disabled = true;
+    try { await api('/api/admin/backup/run', { method:'POST' }); toast('Снимок готов'); buildBackup(); }
+    catch(e){ toast('Не удалось сделать снимок: ' + e.message, true); $('bkRun').disabled = false; }
+  };
+  panel.querySelectorAll('[data-bk-dl]').forEach(btn => btn.onclick = () => downloadBackup(btn.dataset.bkDl));
+  panel.querySelectorAll('[data-bk-rs]').forEach(btn => btn.onclick = async () => {
+    const name = btn.dataset.bkRs;
+    if(!await confirmDialog(`Восстановление заменит ВСЕ текущие данные (товары, заказы, настройки, картинки) копией от ${name}. Продолжить?`, 'Восстановить')) return;
+    try {
+      await api('/api/admin/backup/restore', { method:'POST', body: JSON.stringify({ name }) });
+      toast('Восстановлено');
+      await init();       // перечитать настройки и товары с диска
+      buildBackup();
+    } catch(e){ toast('Не удалось восстановить: ' + e.message, true); }
+  });
+  panel.querySelectorAll('[data-bk-rm]').forEach(btn => btn.onclick = async () => {
+    const name = btn.dataset.bkRm;
+    if(!await confirmDialog(`Удалить снимок ${name}?`, 'Удалить')) return;
+    try { await api('/api/admin/backup?name=' + encodeURIComponent(name), { method:'DELETE' }); toast('Удалено'); buildBackup(); }
+    catch(e){ toast('Не удалось удалить: ' + e.message, true); }
+  });
+}
+
+async function downloadBackup(name){
+  try {
+    const res = await fetch('/api/admin/backup/download?name=' + encodeURIComponent(name), { headers: { 'x-admin-token': TOKEN } });
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `backup-${name}.tar.gz`;
+    a.click();
+    setTimeout(()=> URL.revokeObjectURL(a.href), 30000);
+  } catch(e){ toast('Не удалось скачать: ' + e.message, true); }
 }
 
 // ---------- Обзор ----------

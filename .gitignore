@@ -1,10 +1,12 @@
 .env
 data/
 data-smoke/
+backups/
 node_modules/
 *.log
 .git-stage1.diff
 check-system.ps1
+debug-token.ps1
 
 # Профиль браузера от рендера слайдов: кэш, куки, токены. В репозиторий
 # такое попадать не должно ни при каких условиях.

@@ -77,7 +77,11 @@ function createStore(dataDir) {
   // корректной остановке процесса: без этого можно выйти на середине записи.
   const flush = () => writeChain;
 
-  return { read, write, saveImage, imagePath, deleteImage, flush, DATA_DIR, IMG_DIR };
+  // Сброс кэша: следующий read() перечитает файл с диска. Нужно восстановлению
+  // из бэкапа — файлы подменили снаружи, и кэш в памяти им больше не владелец.
+  const reload = () => cache.clear();
+
+  return { read, write, saveImage, imagePath, deleteImage, flush, reload, DATA_DIR, IMG_DIR };
 }
 
 module.exports = { createStore };

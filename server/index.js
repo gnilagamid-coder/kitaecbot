@@ -25,6 +25,7 @@ const { execFile } = require('node:child_process');
 
 const authguard = require('./authguard');
 const { createTenant } = require('./tenant');
+const { createBackupManager } = require('./backup');
 const { sanitize, mergeDeep } = require('./settings');
 const { esc } = require('./telegram');
 const payments = require('./payments');
@@ -61,6 +62,15 @@ const store = tenant.store;
 const ordersRepo = tenant.orders;
 const bot = tenant.bot;
 const { tgApi, validateInitData, BOT_TOKEN, API_BASE } = tenant.telegram;
+
+// Резервные копии папки данных: снимки по расписанию и вручную из админки.
+// BACKUP_DIR не задан — копии ложатся в backups/ рядом с папкой данных.
+const backup = createBackupManager({
+  dataDir: store.DATA_DIR,
+  backupsRoot: process.env.BACKUP_DIR,
+  tenantId: tenant.id || 'shop',
+  store,
+});
 
 // ---------- утилиты ----------
 const TEXTUAL = new Set(['.html', '.js', '.css', '.json', '.svg']);
@@ -1151,6 +1161,50 @@ async function handleApi(req, res, url) {
       return json(res, 200, { ok: true });
     }
 
+    // ===== резервные копии =====
+    // Снимок = вся папка данных (JSON + картинки) с манифестом sha256.
+    // Конфиг и список — в GET; включение/интервал/retention — в PUT.
+    if (p === '/api/admin/backup') {
+      if (method === 'GET') return json(res, 200, await backup.status());
+      if (method === 'PUT') {
+        let b; try { b = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
+        try { return json(res, 200, await backup.updateConfig(b)); }
+        catch (e) { return json(res, 500, { error: e.message }); }
+      }
+      if (method === 'DELETE') {
+        try { await backup.remove(url.searchParams.get('name')); }
+        catch (e) { return json(res, e.status || 500, { error: e.message }); }
+        return json(res, 200, { ok: true });
+      }
+    }
+
+    if (p === '/api/admin/backup/run' && method === 'POST') {
+      try { return json(res, 200, { ok: true, snapshot: await backup.runNow('manual') }); }
+      catch (e) { return json(res, e.status || 500, { error: e.message }); }
+    }
+
+    // Восстановление откатывает данные целиком — только с подтверждением в UI
+    // и после сверки контрольных сумм снимка (см. backup.js).
+    if (p === '/api/admin/backup/restore' && method === 'POST') {
+      let b; try { b = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
+      try { return json(res, 200, await backup.restore(b.name)); }
+      catch (e) { return json(res, e.status || 500, { error: e.message }); }
+    }
+
+    if (p === '/api/admin/backup/download' && method === 'GET') {
+      let buf;
+      try { buf = await backup.archive(url.searchParams.get('name')); }
+      catch (e) { return json(res, e.status || 500, { error: e.message }); }
+      const name = url.searchParams.get('name');
+      res.writeHead(200, {
+        'Content-Type': 'application/gzip',
+        'Content-Length': buf.length,
+        'Content-Disposition': `attachment; filename="backup-${name}.tar.gz"`,
+        'Cache-Control': 'no-store',
+      });
+      return res.end(buf);
+    }
+
     return json(res, 404, { error: 'unknown admin endpoint' });
   }
 
@@ -1191,8 +1245,9 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`[web] http://${HOST}:${PORT}  (данные: ${store.DATA_DIR})`);
   bot.start();
+  backup.start();
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
-  process.on(sig, () => { bot.stop(); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 3000); });
+  process.on(sig, () => { bot.stop(); backup.stop(); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 3000); });
 }
