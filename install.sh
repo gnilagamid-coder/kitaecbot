@@ -5,7 +5,10 @@ set -euo pipefail
 
 APP_DIR="/opt/tg-shop"
 SERVICE="tg-shop"
-NODE_MAJOR=20
+# 24, а не 20: бэкенд хранилища на SQLite использует встроенный node:sqlite,
+# который появился в 22.5 и работает без флага с 23.4. На Node 20 магазин
+# тоже запустится, но только с файловым хранилищем (STORE_BACKEND=file).
+NODE_MAJOR=24
 
 say()  { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m!  %s\033[0m\n' "$*"; }
@@ -20,7 +23,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq curl ca-certificates gnupg rsync >/dev/null
 
-if ! command -v node >/dev/null 2>&1 || [ "$(node -v | cut -d. -f1 | tr -d v)" -lt 18 ]; then
+if ! command -v node >/dev/null 2>&1 || [ "$(node -v | cut -d. -f1 | tr -d v)" -lt 22 ]; then
   say "Ставлю Node.js ${NODE_MAJOR}"
   curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - >/dev/null
   apt-get install -y -qq nodejs >/dev/null

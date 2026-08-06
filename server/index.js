@@ -47,7 +47,12 @@ if (!ADMIN_TOKEN) {
 // работают с объектом, а не с глобальным состоянием.
 const tenant = createTenant({
   id: process.env.SHOP_ID || '',
+  // file по умолчанию: обновление уже работающего магазина не должно менять
+  // способ хранения само по себе. Переезд на базу — осознанное действие,
+  // скрипт scripts/migrate-to-sqlite.js плюс STORE_BACKEND=sqlite в .env.
+  backend: (process.env.STORE_BACKEND || 'file').toLowerCase(),
   dataDir: process.env.DATA_DIR,
+  dbFile: process.env.DB_FILE,
   botToken: process.env.BOT_TOKEN,
   adminToken: ADMIN_TOKEN,
   publicUrl: process.env.PUBLIC_URL,

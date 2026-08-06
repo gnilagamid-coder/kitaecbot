@@ -212,6 +212,9 @@ function all() {
 
 module.exports = {
   createOrders,
+  // toCSV и normalize чистые — их переиспользует SQL-реализация, чтобы формат
+  // выгрузки и разбор старых заказов были одни на оба бэкенда, а не два похожих.
+  toCSV,
   STATUSES, STATUS_LABELS, HOT_LIMIT,
   _internal: { normalize, csvCell, csvNumber },
 };
