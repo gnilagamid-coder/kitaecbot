@@ -2,12 +2,16 @@
   "name": "tg-shop-miniapp",
   "version": "2.0.0",
   "private": true,
-  "description": "Кастомизируемый магазин-конструктор для Telegram Mini Apps. Работает на VPS, зависимостей нет.",
-  "engines": { "node": ">=18" },
+  "description": "Кастомизируемый магазин-конструктор для Telegram Mini Apps. Работает на VPS; единственная зависимость — драйвер mysql2 для этапа SaaS.",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "test": "node --test \"test/*.test.js\""
   },
-  "dependencies": {}
+  "dependencies": {
+    "mysql2": "3.23.2"
+  }
 }

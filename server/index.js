@@ -13,15 +13,7 @@ const { execFile } = require('node:child_process');
 
 // Мини-загрузчик .env — чтобы `node server/index.js` работал и без systemd,
 // который в проде подставляет переменные сам через EnvironmentFile.
-(function loadEnv() {
-  try {
-    const raw = fs.readFileSync(path.join(__dirname, '..', '.env'), 'utf8');
-    for (const line of raw.split('\n')) {
-      const m = /^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/i.exec(line);
-      if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
-    }
-  } catch (e) { /* нет .env — значит переменные пришли из окружения */ }
-})();
+require('./env').loadEnv();
 
 const authguard = require('./authguard');
 const { createTenant } = require('./tenant');
