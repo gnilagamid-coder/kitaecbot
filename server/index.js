@@ -19,7 +19,11 @@ const authguard = require('./authguard');
 const { createTenant } = require('./tenant');
 const { createBackupManager } = require('./backup');
 const { sanitize, mergeDeep } = require('./settings');
-const { esc } = require('./telegram');
+const { esc, createTelegram } = require('./telegram');
+const { encryptSecret } = require('./secrets');
+// Разовый клиент Bot API под конкретный токен — нужен, чтобы проверить
+// присланный продавцом токен до того, как он попадёт в базу.
+const createTenantTelegram = token => createTelegram({ botToken: token, apiBase: process.env.TELEGRAM_API_BASE });
 const payments = require('./payments');
 const { resolveTheme, onAccentColor } = require('../public/theme-core.js');
 
@@ -627,6 +631,13 @@ async function handleApi(req, res, url) {
     }
     let update;
     try { update = await readBody(req); } catch (e) { res.writeHead(200); return res.end('ok'); }
+    // Приостановленный магазин апдейты принимает, но не обрабатывает: отвечать
+    // отказом нельзя (Telegram будет ретраить сутками), а обслуживать клиентов
+    // магазина, за который не заплачено, — тем более.
+    if (MULTI && currentTenant().status !== 'active') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      return res.end('ok');
+    }
     // Отвечаем 200 сразу, обработку делаем следом: если ответить не-2XX или
     // затянуть, Telegram будет слать тот же апдейт повторно.
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -1137,6 +1148,13 @@ async function handleApi(req, res, url) {
         views: Object.values(views).reduce((a, b) => a + b, 0),
         users: Object.keys(store.read('users', {})).length,
         botConnected: !!tg.BOT_TOKEN,
+        // Что админке знать про режим работы: в платформе токен бота задаётся
+        // из самой админки, в одиночной установке — только в .env.
+        platform: {
+          multitenant: MULTI,
+          botUsername: MULTI ? (currentTenant().botUsername || '') : '',
+          botMode: MULTI ? currentTenant().bot.currentMode() : '',
+        },
       });
     }
 
@@ -1214,6 +1232,50 @@ async function handleApi(req, res, url) {
 
     if (p === '/api/admin/payment-providers' && method === 'GET') {
       return json(res, 200, payments.providerSchema());
+    }
+
+    // Подключить или сменить бота уже после регистрации. Лендинг обещает
+    // «токен можно добавить позже», но способа сделать это не было вообще:
+    // registry.setBotToken существовал и не вызывался ниоткуда. Токен шифруется
+    // тем же ключом платформы, что и при регистрации, и бот перезапускается
+    // на месте — без рестарта процесса и без простоя соседних магазинов.
+    if (p === '/api/admin/bot-token' && method === 'PUT') {
+      if (!MULTI) return json(res, 400, { error: 'в одиночном режиме токен задаётся в .env' });
+      let b; try { b = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
+      const token = String(b.token || '').trim();
+      // Формат токена от BotFather: <цифры>:<буквенно-цифровая часть>.
+      // Проверяем до похода в Telegram, чтобы очевидный мусор не ждал сети.
+      if (token && !/^\d{5,}:[A-Za-z0-9_-]{30,}$/.test(token)) {
+        return json(res, 400, { error: 'не похоже на токен от @BotFather' });
+      }
+
+      const t = currentTenant();
+      if (token) {
+        // Токен принимаем только рабочий: иначе продавец сохранит опечатку и
+        // будет гадать, почему бот молчит.
+        const probe = createTenantTelegram(token);
+        const me = await probe.tgApi('getMe', {}, { retries: 0, timeoutMs: 12000 });
+        if (!me.ok) return json(res, 400, { error: `Telegram отклонил токен: ${me.description}` });
+
+        // Занятость чужим магазином: один и тот же бот в двух магазинах — это
+        // 409 на опросе и перехваченные заказы на вебхуке.
+        const [rows] = await platformDb.query(
+          'SELECT subdomain FROM shops WHERE bot_username = ? AND id <> ?',
+          [me.result.username, t.shopId]).catch(() => [[]]);
+        if (rows && rows.length) {
+          return json(res, 409, { error: `бот @${me.result.username} уже подключён к другому магазину` });
+        }
+
+        await registry.setBotToken(t.shopId, Buffer.from(encryptSecret(token, SECRET_KEY), 'utf8'), me.result.username);
+        await rebuildTenant(t.subdomain);
+        return json(res, 200, { ok: true, username: me.result.username });
+      }
+
+      // Пустой токен — отключить бота: снимаем вебхук и забываем токен.
+      await t.bot.stop();
+      await registry.setBotToken(t.shopId, null, null);
+      await rebuildTenant(t.subdomain);
+      return json(res, 200, { ok: true, username: '' });
     }
 
     if (p === '/api/admin/test-notification' && method === 'POST') {
@@ -1407,10 +1469,12 @@ async function buildTenantFromRow(row) {
     publicUrl: `https://${row.subdomain}.${MULTI_DOMAIN}`,
     apiBase: process.env.TELEGRAM_API_BASE,
     botMode: process.env.BOT_MODE,
+    strictWebhook: String(process.env.BOT_STRICT_WEBHOOK || '') === '1',
     adminChatIds: Array.isArray(row.admin_chat_ids) ? row.admin_chat_ids : [],
   });
   t.subdomain = row.subdomain;
   t.shopId = row.shop_id;
+  t.botUsername = row.bot_username || '';
   t.status = row.status;
   t.createdAt = row.created_at || null;
   // Данные в БД — снимки папки не применяются; интерфейс у заглушки тот же.
@@ -1559,6 +1623,27 @@ function servePlatform(res, url) {
   return json(res, 404, { error: 'not found' });
 }
 
+// Пересобрать арендатора из свежей строки реестра и подменить его в роутере.
+// Нужно там, где поменялось то, что читается один раз при сборке: токен бота,
+// список владельцев, ключи. Старого гасим аккуратно — иначе его бот останется
+// зарегистрированным у Telegram и продолжит тянуть апдейты на тот же адрес.
+async function rebuildTenant(subdomain) {
+  const row = await registry.findShopBySubdomain(subdomain);
+  if (!row) return null;
+  const old = tenantsBySub.get(subdomain);
+  if (old) {
+    await old.bot.stop();
+    old.backup.stop();
+  }
+  const fresh = await buildTenantFromRow(row);
+  tenantsBySub.set(subdomain, fresh);
+  if (fresh.status === 'active') {
+    fresh.bot.start();
+    fresh.backup.start();
+  }
+  return fresh;
+}
+
 // Оплата прошла: магазин уже active в БД (делает billing), здесь синхроним
 // кэш роутера и возвращаем бота в эфир.
 async function syncShopAfterPay(subdomain) {
@@ -1591,7 +1676,12 @@ function serveSuspended(res, url) {
 // статика — чтобы продавец мог войти и оплатить продление.
 function suspendedAllowed(p) {
   return p === '/admin.html' || p.startsWith('/api/admin/')
-    || p === '/shared.js' || p === '/theme-core.js' || p === '/favicon.ico';
+    || p === '/shared.js' || p === '/theme-core.js' || p === '/favicon.ico'
+    // Вебхук принимаем даже у приостановленного магазина. Отдавать Telegram
+    // отказ нельзя: он считает это сбоем доставки и ретраит один и тот же
+    // апдейт часами, наматывая запросы на весь процесс. Приняли, ответили
+    // 200 — и внутри тихо ничего не сделали (см. проверку статуса в ручке).
+    || p === '/api/webhook';
 }
 
 // Поднимает реестр и всех зарегистрированные магазины. Вызывается в listen:

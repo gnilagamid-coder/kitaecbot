@@ -34,6 +34,10 @@ function createTenant({
   publicUrl = '',
   apiBase = DEFAULT_API_BASE,
   botMode = 'polling',
+  // Запрет отката на long polling при неудачном setWebhook. Нужен, когда
+  // процессов несколько: два поллера на один токен дают вечный 409 Conflict
+  // у обоих, и лучше остаться без бота с записью в логе, чем сломать соседа.
+  strictWebhook = false,
   adminChatIds = [],
   // Готовое хранилище (например, store-db в режиме платформы). Не задано —
   // файловый стор на dataDir, как всегда.
@@ -49,6 +53,7 @@ function createTenant({
     adminToken,
     publicUrl: String(publicUrl || '').replace(/\/$/, ''),
     botMode,
+    strictWebhook,
     // Кому из телеграма открыта админка (chat_id владельцев). Пусто —
     // входа из бота нет, остаётся только ADMIN_TOKEN.
     adminChatIds,

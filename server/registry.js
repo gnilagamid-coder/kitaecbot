@@ -57,8 +57,8 @@ function createRegistry(db) {
   // сам решает, обслуживать ли provisioning/suspended (см. resolveTenantByHost).
   async function findShopBySubdomain(subdomain) {
     const [rows] = await db.query(
-      `SELECT s.id AS shop_id, s.subdomain, s.title, s.bot_token_enc, s.admin_token_hash,
-              s.session_key, s.admin_chat_ids, s.status, s.created_at, s.tenant_id,
+      `SELECT s.id AS shop_id, s.subdomain, s.title, s.bot_token_enc, s.bot_username,
+              s.admin_token_hash, s.session_key, s.admin_chat_ids, s.status, s.created_at, s.tenant_id,
               t.slug AS tenant_slug, t.name AS tenant_name, t.email AS tenant_email
          FROM shops s JOIN tenants t ON t.id = s.tenant_id
         WHERE s.subdomain = ?`,
@@ -90,8 +90,11 @@ function createRegistry(db) {
     await db.query('UPDATE shops SET status = ? WHERE id = ?', [status, shopId]);
   }
 
-  async function setBotToken(shopId, encBuf) {
-    await db.query('UPDATE shops SET bot_token_enc = ? WHERE id = ?', [encBuf, shopId]);
+  // encBuf === null означает «отключить бота»: чистим и токен, и имя.
+  async function setBotToken(shopId, encBuf, botUsername = null) {
+    await db.query(
+      'UPDATE shops SET bot_token_enc = ?, bot_username = ? WHERE id = ?',
+      [encBuf, botUsername, shopId]);
   }
 
   async function countShops() {

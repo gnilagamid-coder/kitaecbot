@@ -72,6 +72,9 @@ function createBot(t) {
 
   let offset = 0;
   let running = false;
+  // 'off' | 'polling' | 'webhook' — нужен, чтобы stop() знал, что именно гасить:
+  // цикл опроса или регистрацию у Telegram.
+  let mode = 'off';
 
   // URL для открытия мини-аппа кнопками web_app и menu button.
   // Приоритет: ссылка вида t.me/bot/app (это уже готовая ссылка Mini App,
@@ -384,12 +387,18 @@ function createBot(t) {
     }
   }
 
-  // Секрет вебхука выводим детерминированно из токенов, чтобы не заводить ещё одну
-  // переменную окружения: Telegram шлёт его в заголовке X-Telegram-Bot-Api-Secret-Token,
-  // и без этой проверки любой желающий мог бы слать боту поддельные апдейты POST-запросом.
+  // Секрет вебхука выводим детерминированно, чтобы не заводить ещё одну
+  // переменную окружения: Telegram шлёт его в заголовке
+  // X-Telegram-Bot-Api-Secret-Token, и без этой проверки любой желающий мог бы
+  // слать боту поддельные апдейты обычным POST-запросом.
+  //
+  // В состав входит ключ магазина, а не только токен бота. Раньше секрет был
+  // sha256(BOT_TOKEN + '|' + adminToken), а в режиме платформы adminToken пуст —
+  // и у всех магазинов без подключённого бота секрет получался одинаковым.
+  // Плюс он вычислялся из одного лишь токена: утечка токена давала и секрет.
   function webhookSecret() {
     return crypto.createHash('sha256')
-      .update(BOT_TOKEN + '|' + (t.adminToken || ''))
+      .update(`${BOT_TOKEN}|${t.sessionKey || ''}|${t.adminToken || ''}|${t.id || ''}`)
       .digest('hex')
       .slice(0, 48);
   }
@@ -437,6 +446,10 @@ function createBot(t) {
     if (wantWebhook) {
       // Telegram принимает вебхук только на портах 443, 80, 88 и 8443 и только по HTTPS
       if (!/^https:\/\//i.test(publicUrl)) {
+        if (t.strictWebhook) {
+          console.error(`${tag} BOT_MODE=webhook, но PUBLIC_URL не https — бот не запущен (откат на polling запрещён)`);
+          return;
+        }
         console.error(`${tag} BOT_MODE=webhook, но PUBLIC_URL не https — откатываюсь на long polling`);
       } else {
         const url = `${publicUrl}/api/webhook`;
@@ -447,8 +460,17 @@ function createBot(t) {
           max_connections: 40,
         });
         if (res.ok) {
+          mode = 'webhook';
           console.log(`${tag} запущен как @${me.result.username}, режим: webhook → ${url}`);
           return; // апдейты придёт приносить HTTP-сервер, опрос не нужен
+        }
+        // Откат на polling безопасен, только пока процесс один. При нескольких
+        // экземплярах (кластер, балансировщик) два поллера на один токен дают
+        // вечный 409 Conflict у обоих — там лучше остаться без бота и увидеть
+        // это в логе, чем тихо сломать соседний процесс.
+        if (t.strictWebhook) {
+          console.error(`${tag} setWebhook не удался:`, res.description, '— бот не запущен (откат на polling запрещён)');
+          return;
         }
         console.error(`${tag} setWebhook не удался:`, res.description, '— откатываюсь на long polling');
       }
@@ -457,15 +479,32 @@ function createBot(t) {
     console.log(`${tag} запущен как @${me.result.username}, режим: long polling`);
     // long polling и вебхук взаимоисключающи — снимаем вебхук, иначе getUpdates не работает
     await tgApi('deleteWebhook', { drop_pending_updates: false });
+    mode = 'polling';
     running = true;
     poll();
   }
 
-  function stop() { running = false; }
+  // Остановка бота. В режиме опроса достаточно погасить цикл, а вот вебхук
+  // нужно снять у самого Telegram: иначе приостановленный магазин остаётся
+  // зарегистрированным, апдейты продолжают литься на его адрес, сервер отвечает
+  // отказом — и Telegram ретраит это часами. Раньше stop() гасил только цикл,
+  // и в режиме вебхука фактически не останавливал ничего.
+  async function stop() {
+    running = false;
+    if (mode !== 'webhook') { mode = 'off'; return; }
+    mode = 'off';
+    if (!BOT_TOKEN) return;
+    const res = await tgApi('deleteWebhook', { drop_pending_updates: false }).catch(e => ({ ok: false, description: e.message }));
+    if (res && res.ok) console.log(`${tag} вебхук снят`);
+    else console.warn(`${tag} не удалось снять вебхук:`, res && res.description);
+  }
+
+  const currentMode = () => mode;
 
   return {
     start, stop, notifyManagers, sendToSubscribers, fill, normalize,
     handleUpdate, webhookSecret, shopWebAppUrl, sendWithFallback, menuButtonText,
+    currentMode,
   };
 }
 
