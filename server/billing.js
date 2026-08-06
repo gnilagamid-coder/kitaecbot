@@ -15,6 +15,9 @@
 const { createRobokassa } = require('./robokassa');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+// Минимальная неприкосновенность нового магазина, независимо от настроек
+// триала: сутки. Продавец должен успеть хотя бы дойти до оплаты.
+const MIN_GRACE_MS = DAY_MS;
 
 function createBilling({ db, registry, cfg }) {
   const enabled = Boolean(cfg.login && cfg.pass1 && cfg.pass2);
@@ -53,12 +56,22 @@ function createBilling({ db, registry, cfg }) {
     }
     const amount = price;
     let invId, url;
+
+    // Номер счёта — это автоинкремент строки (см. миграцию 0005). Уникальность
+    // обеспечивает сама СУБД, конкурировать не за что.
+    //
+    // Раньше номер считался как SELECT MAX(inv_id)+1 отдельным запросом: обычный
+    // SELECT в InnoDB при REPEATABLE READ ничего не блокирует, и два продавца,
+    // нажавшие «Оплатить» одновременно, получали один и тот же номер — второму
+    // прилетала ошибка дубликата вместо ссылки на оплату. Попытка склеить чтение
+    // и вставку в один INSERT ... SELECT дубликаты убрала, но принесла дедлоки:
+    // такой запрос берёт gap-локи по той же таблице, в которую пишет.
     await db.tx(async conn => {
-      const [[m]] = await conn.query('SELECT COALESCE(MAX(inv_id), 0) AS n FROM invoices');
-      invId = Number(m.n) + 1;
-      await conn.query(
-        'INSERT INTO invoices (shop_id, inv_id, plan, amount) VALUES (?, ?, ?, ?)',
-        [shopRow.shop_id, invId, 'month', amount]);
+      const [r] = await conn.query(
+        'INSERT INTO invoices (shop_id, inv_id, plan, amount) VALUES (?, NULL, ?, ?)',
+        [shopRow.shop_id, 'month', amount]);
+      invId = Number(r.insertId);
+      await conn.query('UPDATE invoices SET inv_id = ? WHERE id = ?', [invId, invId]);
     });
     const title = shopRow.title || shopRow.subdomain;
     url = rk.payUrl({
@@ -120,7 +133,16 @@ function createBilling({ db, registry, cfg }) {
   // таймеру. Если биллинг выключен — никто никогда не приостанавливается.
   async function enforce(now = new Date()) {
     if (!enabled) return [];
-    const trialCutoff = new Date(now.getTime() - trialDays * DAY_MS);
+    // Свежерегистрировавшийся магазин не приостанавливаем никогда, даже если
+    // триала нет. Без этой отсечки BILLING_TRIAL_DAYS=0 (а это значение по
+    // умолчанию) при включённом биллинге клал витрины всем разом, включая
+    // магазин, созданный секунду назад: cutoff совпадал с «сейчас», и любой
+    // неоплаченный магазин попадал под приостановку в первую же минуту.
+    const graceCutoff = new Date(now.getTime() - MIN_GRACE_MS);
+    const trialCutoff = new Date(Math.min(
+      now.getTime() - trialDays * DAY_MS,
+      graceCutoff.getTime()
+    ));
     const [rows] = await db.query(
       `SELECT s.id AS shop_id, s.subdomain, sub.paid_until, s.created_at
          FROM shops s LEFT JOIN subscriptions sub ON sub.shop_id = s.id

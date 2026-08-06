@@ -35,6 +35,10 @@ async function provisionShop({
   // Пароль админки показывается владельцу ровно один раз — в ответе регистрации.
   const adminToken = crypto.randomBytes(18).toString('base64url');
   const adminTokenHash = sha256hex(adminToken);
+  // Ключ подписи билетов админки — отдельный и случайный, не производный от
+  // пароля. Раньше подписывали на adminTokenHash, и утёкший дамп базы позволял
+  // выписать себе билет в чужую админку, не зная пароля вовсе.
+  const sessionKey = crypto.randomBytes(32).toString('hex');
 
   const name = String(shopName || '').trim().slice(0, 190) || `Магазин ${sub}`;
   const tenantId = await registry.createTenant({
@@ -53,6 +57,7 @@ async function provisionShop({
     subdomain: sub,
     title: name,
     adminTokenHash,
+    sessionKey,
     botTokenEnc,
     status: 'active',
   });

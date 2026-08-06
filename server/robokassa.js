@@ -12,8 +12,20 @@
 const crypto = require('node:crypto');
 
 const md5 = s => crypto.createHash('md5').update(String(s), 'utf8').digest('hex');
-const same = (a, b) => String(a || '').toLowerCase() === String(b || '').toLowerCase();
 const fmtAmount = n => Number(n).toFixed(2);
+
+// Сравнение подписей — константное по времени, как и везде в проекте.
+// Обычный === выходил из строки посимвольно и в теории давал таймингу
+// подсказку, какой префикс подписи угадан. Через сеть на MD5 это не вскрыть,
+// но здесь дешевле быть последовательным, чем объяснять, почему единственное
+// место с деньгами сравнивается иначе, чем всё остальное.
+// Сравниваем sha256-дайджесты: длины всегда равны, а регистр Robokassa
+// присылает как ей удобно, поэтому нормализуем заранее.
+function same(a, b) {
+  const da = crypto.createHash('sha256').update(String(a || '').toLowerCase()).digest();
+  const db = crypto.createHash('sha256').update(String(b || '').toLowerCase()).digest();
+  return crypto.timingSafeEqual(da, db);
+}
 
 function createRobokassa({ login, pass1, pass2, baseUrl = 'https://auth.robokassa.ru/Merchant/Index.aspx', isTest = false }) {
   if (!login || !pass1 || !pass2) throw new Error('robokassa: нужны login, pass1 и pass2');

@@ -16,6 +16,13 @@ const cfg = dbConfigFromEnv();
 // БД на прогон: имя случайное, чтобы параллельные запуски не пересекались.
 const TEST_DB = 'kitaec_mig_' + Math.random().toString(36).slice(2, 8);
 
+// Список миграций читаем с диска, а не перечисляем руками: иначе каждая
+// новая миграция «ломает» тесты, которые на самом деле проверяют не состав
+// каталога, а то, что накат идёт по порядку и повторно ничего не применяет.
+const MIGRATION_FILES = fs.readdirSync(path.join(__dirname, '..', 'server', 'migrations'))
+  .filter(f => f.endsWith('.sql'))
+  .sort((a, b) => a.localeCompare(b));
+
 let db;       // пул на тестовую базу
 let root;     // пул без database — создавать/ронять саму базу
 let migrator;
@@ -55,7 +62,7 @@ const skip = t => { if (!available) { t.skip('MySQL недоступен'); retu
 test('up() создаёт всю схему и фиксирует миграцию', async t => {
   if (skip(t)) return;
   const applied = await migrator.up();
-  assert.deepStrictEqual(applied, ['0001_core.sql', '0002_shop_docs.sql', '0003_billing.sql']);
+  assert.deepStrictEqual(applied, MIGRATION_FILES);
 
   const [rows] = await db.query('SHOW TABLES');
   const tables = rows.map(r => Object.values(r)[0]).sort();
@@ -66,11 +73,7 @@ test('повторный up() ничего не применяет (идемпо
   if (skip(t)) return;
   assert.deepStrictEqual(await migrator.up(), []);
   const status = await migrator.status();
-  assert.deepStrictEqual(status, [
-    { name: '0001_core.sql', state: 'applied' },
-    { name: '0002_shop_docs.sql', state: 'applied' },
-    { name: '0003_billing.sql', state: 'applied' },
-  ]);
+  assert.deepStrictEqual(status, MIGRATION_FILES.map(name => ({ name, state: 'applied' })));
 });
 
 test('правленный файл применённой миграции отклоняется', async t => {

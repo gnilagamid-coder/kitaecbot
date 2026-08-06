@@ -62,7 +62,18 @@
   .token{display:block; margin-top:8px; padding:10px 12px; border-radius:10px;
     background:rgba(0,0,0,.35); font-family:ui-monospace,Menlo,Consolas,monospace;
     word-break:break-all; user-select:all}
+  /* Пароль показывается ровно один раз, и выделять 24 случайных символа
+     пальцем на телефоне — худшее, что можно предложить в этот момент. */
+  .copy-btn{margin-top:10px; padding:10px 14px; font-size:14px}
+  .copy-btn.done{background-color:#30d158; box-shadow:none}
   .hint{margin-top:10px; color:var(--muted); font-size:12.5px}
+  .warn{margin-top:12px; padding:10px 12px; border-radius:12px; font-size:13px;
+    background:color-mix(in srgb, var(--danger) 14%, transparent);
+    border:1px solid color-mix(in srgb, var(--danger) 40%, transparent)}
+  /* Согласие с условиями: без него нельзя собирать почту и заводить аккаунты */
+  .agree{display:flex; align-items:flex-start; gap:10px; margin-top:18px; font-size:13px; color:var(--muted)}
+  .agree input{width:18px; height:18px; flex:0 0 18px; margin-top:1px; accent-color:var(--accent)}
+  .agree a{color:var(--accent-2)}
 </style>
 </head>
 <body>
@@ -85,16 +96,24 @@
       <input id="email" name="email" type="email" maxlength="190" placeholder="you@mail.ru">
 
       <label for="botToken">Токен бота (необязательно)</label>
-      <input id="botToken" name="botToken" maxlength="200" placeholder="Токен от @BotFather — можно добавить позже">
+      <input id="botToken" name="botToken" maxlength="200" placeholder="Можно добавить позже">
+
+      <label class="agree">
+        <input type="checkbox" id="agree" required>
+        <span id="agreeText">Соглашаюсь с условиями сервиса и обработкой персональных данных</span>
+      </label>
 
       <button id="submitBtn" type="submit">Создать магазин</button>
+      <div class="hint">Пароль от админки покажем один раз сразу после создания — приготовьтесь сохранить.</div>
       <div class="msg" id="msg"></div>
     </form>
 
     <div class="result" id="result">
       <div>Витрина: <a id="shopUrl" target="_blank" rel="noopener"></a></div>
-      <div style="margin-top:10px">Пароль админки — сохраните, показываем один раз:</div>
+      <div style="margin-top:10px">Пароль админки:</div>
       <span class="token" id="adminToken"></span>
+      <button type="button" class="copy-btn" id="copyBtn">Скопировать пароль</button>
+      <div class="warn">Показываем один раз. Закроете страницу — восстановить будет нельзя, придётся заводить магазин заново.</div>
       <div class="hint">Админка откроется по адресу магазина: /admin.html</div>
     </div>
   </div>
@@ -138,6 +157,32 @@
       document.getElementById('shopUrl').href = data.url;
       document.getElementById('shopUrl').textContent = data.url.replace(/^https:\/\//, '');
       document.getElementById('adminToken').textContent = data.adminToken;
+
+      // Копирование пароля. clipboard API доступен только в защищённом
+      // контексте, поэтому держим запасной путь через выделение — иначе на
+      // http-стенде кнопка молча ничего не делала бы.
+      var copyBtn = document.getElementById('copyBtn');
+      copyBtn.onclick = function () {
+        var done = function () {
+          copyBtn.textContent = 'Пароль скопирован';
+          copyBtn.className = 'copy-btn done';
+        };
+        if (navigator.clipboard && window.isSecureContext) {
+          navigator.clipboard.writeText(data.adminToken).then(done, fallback);
+        } else { fallback(); }
+        function fallback() {
+          var el = document.getElementById('adminToken');
+          var r = document.createRange();
+          r.selectNodeContents(el);
+          var sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(r);
+          var ok = false;
+          try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+          if (ok) done();
+          else { copyBtn.textContent = 'Выделите и скопируйте вручную'; }
+        }
+      };
     } catch (e) {
       msg.className = 'msg err'; msg.textContent = e.message;
       btn.disabled = false; btn.textContent = 'Создать магазин';

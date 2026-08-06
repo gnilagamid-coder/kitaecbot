@@ -1152,9 +1152,14 @@ async function handleApi(req, res, url) {
       const checks = [];
       const add = (id, title, ok, detail, fix) => checks.push({ id, title, ok, detail, fix });
 
+      // В режиме платформы у арендатора нет ни SSH, ни .env, ни systemd —
+      // советовать ему «впишите токен в /opt/tg-shop/.env» бессмысленно, а
+      // заодно это раскрывает пути и модель развёртывания платформы.
       add('token', 'Токен бота задан', !!tg.BOT_TOKEN,
-        tg.BOT_TOKEN ? 'BOT_TOKEN прочитан из .env' : 'BOT_TOKEN пуст',
-        'Впишите токен от @BotFather в /opt/tg-shop/.env и перезапустите: systemctl restart tg-shop');
+        tg.BOT_TOKEN ? 'токен бота на месте' : 'токен бота не задан',
+        MULTI
+          ? 'Получите токен у @BotFather (/newbot) и вставьте его на вкладке «Бот» — магазин подхватит его сам.'
+          : 'Впишите токен от @BotFather в .env магазина и перезапустите сервис: systemctl restart tg-shop');
 
       if (tg.BOT_TOKEN) {
         const me = await tgApi('getMe', {}, { retries: 0, timeoutMs: 12000 });
@@ -1369,14 +1374,36 @@ async function buildTenantFromRow(row) {
 
   const store = await createDbStore({ db: platformDb, shopId: row.shop_id, dataDir });
 
+  // Хэш пароля обязан быть ровно 32 байтами: timingSafeEqual бросает на
+  // разной длине, и мусор в колонке уронил бы каждый запрос к админке
+  // невнятной ошибкой вместо честного отказа.
+  const adminHash = Buffer.from(String(row.admin_token_hash || ''), 'hex');
+  if (adminHash.length !== 32) {
+    throw new Error(`${row.subdomain}: admin_token_hash повреждён (${adminHash.length} байт вместо 32)`);
+  }
+
+  // Ключ подписи билетов. У магазинов, заведённых до миграции 0004, колонка
+  // пуста — досыпаем ключ на месте, чтобы не разлогинивать всех разом при
+  // обновлении и не оставлять подпись на хэше пароля.
+  let sessionKey = row.session_key ? String(row.session_key) : '';
+  if (!sessionKey) {
+    sessionKey = crypto.randomBytes(32).toString('hex');
+    try {
+      await registry.setSessionKey(row.shop_id, sessionKey);
+      console.log(`[platform] ${row.subdomain}: выдан отдельный ключ подписи сессий`);
+    } catch (e) {
+      console.error(`[platform] ${row.subdomain}: не удалось сохранить ключ сессий (${e.message})`);
+    }
+  }
+
   const t = createTenant({
     id: `shop-${row.shop_id}`,
     dataDir,
     store,
     botToken,
     adminToken: '',
-    adminHash: Buffer.from(String(row.admin_token_hash), 'hex'),
-    sessionKey: String(row.admin_token_hash), // свой ключ билетов у каждого магазина
+    adminHash,
+    sessionKey,
     publicUrl: `https://${row.subdomain}.${MULTI_DOMAIN}`,
     apiBase: process.env.TELEGRAM_API_BASE,
     botMode: process.env.BOT_MODE,
@@ -1468,7 +1495,17 @@ async function handlePlatform(req, res, url) {
     const params = Object.fromEntries(url.searchParams);
     if (method === 'POST') {
       const chunks = [];
-      for await (const c of req) { chunks.push(c); if (Buffer.concat(chunks).length > 64 * 1024) break; }
+      let size = 0;
+      let overflow = false;
+      for await (const c of req) {
+        size += c.length;
+        // Оборвать чтение мало: недочитанный запрос оставляет сокет в
+        // подвешенном состоянии. Досасываем поток до конца, просто перестав
+        // копить данные.
+        if (size > 64 * 1024) { overflow = true; continue; }
+        chunks.push(c);
+      }
+      if (overflow) return json(res, 413, { error: 'слишком большое уведомление' });
       Object.assign(params, Object.fromEntries(new URLSearchParams(Buffer.concat(chunks).toString('utf8'))));
     }
     const r = await billing.handleResult(params);
@@ -1492,9 +1529,26 @@ async function handlePlatform(req, res, url) {
   return json(res, 404, { error: 'unknown platform endpoint' });
 }
 
+// Тексты согласия собираем на сервере: адреса оферты и политики обработки
+// данных задаются переменными окружения, а не зашиты в разметку. Пока их не
+// задали, чекбокс остаётся, но без ссылок — согласие всё равно требуется,
+// просто ссылаться пока не на что.
+function agreementHtml() {
+  const offer = String(process.env.PLATFORM_OFFER_URL || '').trim();
+  const privacy = String(process.env.PLATFORM_PRIVACY_URL || '').trim();
+  const link = (href, text) => `<a href="${esc(href)}" target="_blank" rel="noopener">${text}</a>`;
+  const a = offer ? link(offer, 'условиями сервиса') : 'условиями сервиса';
+  const b = privacy ? link(privacy, 'обработкой персональных данных') : 'обработкой персональных данных';
+  return `Соглашаюсь с ${a} и ${b}`;
+}
+
 function servePlatform(res, url) {
   if (url.pathname === '/' || url.pathname === '/index.html' || url.pathname === '/platform.html') {
-    const buf = fs.readFileSync(path.join(PUBLIC_DIR, 'platform.html'));
+    let html = fs.readFileSync(path.join(PUBLIC_DIR, 'platform.html'), 'utf8');
+    html = html.replace(
+      'Соглашаюсь с условиями сервиса и обработкой персональных данных',
+      agreementHtml());
+    const buf = Buffer.from(html, 'utf8');
     res.writeHead(200, {
       'Content-Type': 'text/html; charset=utf-8',
       'Content-Length': buf.length,
@@ -1579,6 +1633,68 @@ async function bootPlatform() {
     const t = tenantsBySub.get(s.subdomain);
     if (t) t.status = 'suspended';
     console.log(`[billing] магазин ${s.subdomain} приостановлен: подписка просрочена`);
+  }
+
+  await syncShopStatuses();
+  // Периодически сверяем кэш роутера с базой и добираем новые магазины.
+  // Без этого статус, изменённый в БД (руками, из будущей админки платформы,
+  // другим процессом), не давал никакого эффекта до перезапуска: витрина
+  // заблокированного магазина продолжала отдавать 200.
+  setInterval(() => {
+    billing.enforce()
+      .then(list => { for (const s of list) console.log(`[billing] магазин ${s.subdomain} приостановлен: подписка просрочена`); })
+      .then(syncShopStatuses)
+      .catch(e => console.error('[platform] синхронизация статусов:', e.message));
+  }, STATUS_SYNC_MS).unref();
+}
+
+// Как часто сверять кэш арендаторов с реестром.
+const STATUS_SYNC_MS = 60 * 1000;
+
+// Приводит кэш роутера в соответствие с базой: меняет статусы, поднимает и
+// глушит ботов, подхватывает магазины, заведённые мимо этого процесса.
+async function syncShopStatuses() {
+  if (!registry) return;
+  let rows;
+  try { rows = await registry.listBootShops(); }
+  catch (e) { console.error('[platform] реестр недоступен:', e.message); return; }
+
+  const alive = new Set();
+  for (const row of rows) {
+    alive.add(row.subdomain);
+    const t = tenantsBySub.get(row.subdomain);
+
+    if (!t) {
+      // магазин появился в базе, пока процесс работал
+      try {
+        const full = await registry.findShopBySubdomain(row.subdomain);
+        const fresh = await buildTenantFromRow(full);
+        tenantsBySub.set(row.subdomain, fresh);
+        if (fresh.status === 'active') { fresh.bot.start(); fresh.backup.start(); }
+        console.log(`[platform] подхвачен магазин ${row.subdomain} (${row.status})`);
+      } catch (e) {
+        console.error(`[platform] ${row.subdomain}: не поднялся — ${e.message}`);
+      }
+      continue;
+    }
+
+    if (t.status === row.status) continue;
+    const was = t.status;
+    t.status = row.status;
+    if (row.status === 'active') {
+      try { t.bot.start(); } catch (e) { console.error(`[platform] ${row.subdomain}: бот не поднялся — ${e.message}`); }
+    } else {
+      t.bot.stop();
+    }
+    console.log(`[platform] ${row.subdomain}: статус ${was} → ${row.status}`);
+  }
+
+  // Магазин удалили из базы или пометили deleted — гасим бота и убираем из роутера.
+  for (const [sub, t] of tenantsBySub) {
+    if (alive.has(sub)) continue;
+    t.bot.stop();
+    tenantsBySub.delete(sub);
+    console.log(`[platform] магазин ${sub} снят с обслуживания`);
   }
 }
 
