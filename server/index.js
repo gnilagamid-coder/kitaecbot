@@ -395,7 +395,7 @@ function bootThemeCSS(s) {
     `--font-display:${FONT_STACKS_SRV[r.fontDisplay] || FONT_STACKS_SRV.system}`,
     `--cols:${s.theme.gridColumns}`, `--ratio:${ratio}`,
   ].join(';');
-  const cls = [s.theme.grain && 'grain', s.theme.diagonal && 'diagonal',
+  const cls = [r.glass && 'glass', s.theme.grain && 'grain', s.theme.diagonal && 'diagonal',
     s.theme.animations === 'off' && 'anim-off',
     s.theme.animations === 'reduced' && 'anim-reduced'].filter(Boolean).join(' ');
   // В режиме «подстроиться под тему Telegram» сервер не знает цветов клиента —

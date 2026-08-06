@@ -252,6 +252,112 @@
   .dialog-text{font-size:14px;line-height:1.5;margin-bottom:18px}
   .dialog-actions{display:flex;gap:8px}
   .dialog-actions button{flex:1}
+
+  /* ============================================================
+     LIQUID GLASS — постоянный язык админки (iOS 26): аура из
+     акцентных пятен за контентом, полупрозрачные панели с
+     преломлением, волосяные грани, капсулы вместо прямых углов.
+     Слой перекрывает базовые правила выше и наследует палитру
+     ADMIN_THEMES через переменные — стеклянной остаётся любая
+     тема, от светлой до контрастной. color-mix берёт оттенок
+     исходной поверхности и делает её полупрозрачной. */
+  body::before{
+    content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;
+    background:
+      radial-gradient(52% 36% at 8% -4%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 70%),
+      radial-gradient(44% 34% at 104% 6%, color-mix(in srgb, var(--accent-2) 16%, transparent), transparent 72%),
+      radial-gradient(60% 46% at 50% 116%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 74%);
+  }
+  /* стеклянная поверхность: переиспользуемая смесь. Там, где backdrop-filter
+     дорог (строки списков), работает просто полупрозрачность. */
+  .card,.topbar,.dialog,.savebar,.toast,.login{
+    -webkit-backdrop-filter:blur(20px) saturate(1.7);
+    backdrop-filter:blur(20px) saturate(1.7);
+  }
+  .card,.row,.order,.stat,.promo-item,.upload-box,.photo-slot,.tag,.dialog,.toast{
+    border-radius:16px;
+  }
+  .card{
+    background:color-mix(in srgb, var(--surface) 62%, transparent);
+    border:1px solid color-mix(in srgb, var(--text) 13%, transparent);
+    box-shadow:inset 0 1px 0 color-mix(in srgb, var(--text) 10%, transparent), 0 8px 28px rgba(0,0,0,.22);
+  }
+  .row,.order,.stat{
+    background:color-mix(in srgb, var(--surface) 48%, transparent);
+    border:1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  }
+  .stat{border-left:3px solid var(--accent)}
+  .promo-item{
+    background:color-mix(in srgb, var(--surface-2) 55%, transparent);
+    border:1px solid color-mix(in srgb, var(--text) 8%, transparent);
+    border-left:3px solid var(--accent);
+  }
+  .topbar{
+    background:color-mix(in srgb, var(--bg) 66%, transparent);
+    border-bottom:1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  }
+  /* вкладки и фильтры — капсулы */
+  .tab,.ofilter{border-radius:999px;background:color-mix(in srgb, var(--surface) 55%, transparent);border:1px solid color-mix(in srgb, var(--text) 10%, transparent)}
+  .tab.active,.ofilter.active{box-shadow:0 4px 14px color-mix(in srgb, var(--accent) 45%, transparent), inset 0 1px 0 rgba(255,255,255,.28)}
+  /* кнопки: спекулярный блик сверху, прямой регистр вместо капслока */
+  button{
+    border-radius:13px;text-transform:none;letter-spacing:.2px;
+    background-image:linear-gradient(180deg, rgba(255,255,255,.25), rgba(255,255,255,0) 55%);
+  }
+  button.secondary{background:color-mix(in srgb, var(--surface-2) 70%, transparent);border:1px solid color-mix(in srgb, var(--text) 10%, transparent)}
+  button.ghost{border-radius:13px;border-color:color-mix(in srgb, var(--text) 16%, transparent)}
+  input,textarea,select{
+    background:color-mix(in srgb, var(--surface-2) 58%, transparent);
+    border:1px solid color-mix(in srgb, var(--text) 12%, transparent);
+    border-radius:12px;
+  }
+  input:focus,textarea:focus,select:focus{
+    border-color:var(--accent);
+    box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .switch-track{border-radius:999px;background:color-mix(in srgb, var(--surface-2) 70%, transparent);border-color:color-mix(in srgb, var(--text) 18%, transparent)}
+  .switch-thumb{border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,.35)}
+  .mark,.row button.icon-toggle,.row-remove{border-radius:10px}
+  .preset{border-radius:14px}
+  .tag{border-radius:999px}
+  .step .num{border-radius:50%}
+  .progress{border-radius:999px;overflow:hidden}
+  .upload-box{border-radius:14px}
+  .photo-slot{border-radius:14px}
+  .btn-fake{border-radius:10px}
+  .login{
+    background:color-mix(in srgb, var(--surface) 58%, transparent);
+    border:1px solid color-mix(in srgb, var(--text) 13%, transparent);
+    border-radius:24px;padding:26px 20px;
+    box-shadow:inset 0 1px 0 color-mix(in srgb, var(--text) 10%, transparent), 0 18px 50px rgba(0,0,0,.35);
+  }
+  .savebar{
+    background:color-mix(in srgb, var(--bg) 70%, transparent);
+    border-top:1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  }
+  .toast{
+    background:color-mix(in srgb, var(--surface-2) 78%, transparent);
+    border:1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    border-radius:999px;
+  }
+  .toast.err{background:var(--danger);border-color:var(--danger)}
+  .dialog-backdrop{-webkit-backdrop-filter:blur(5px);backdrop-filter:blur(5px)}
+  .dialog{
+    background:color-mix(in srgb, var(--surface) 80%, transparent);
+    border:1px solid color-mix(in srgb, var(--text) 14%, transparent);
+    border-radius:20px;
+    box-shadow:inset 0 1px 0 color-mix(in srgb, var(--text) 10%, transparent), 0 24px 60px rgba(0,0,0,.45);
+  }
+  /* телефон-превью: чёрная рамка остаётся, но получает мягкую тень стекла */
+  .phone{border-radius:30px}
+  /* доступность: меньше прозрачности — возвращаем глухие поверхности */
+  @media (prefers-reduced-transparency: reduce){
+    body::before{display:none}
+    .card,.topbar,.dialog,.savebar,.toast,.login,.row,.order,.stat,.promo-item{
+      background:var(--surface);
+      -webkit-backdrop-filter:none;backdrop-filter:none;
+    }
+  }
 </style>
 </head>
 <body>
@@ -305,8 +411,8 @@
 <!-- ?v= бампается при релизе: страхует от промежуточных прокси, которые
      игнорируют no-cache и держат старый shared.js поверх новой разметки -->
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<script src="/theme-core.js?v=2.4"></script>
-<script src="/shared.js?v=2.4"></script>
+<script src="/theme-core.js?v=2.5"></script>
+<script src="/shared.js?v=2.5"></script>
 <script>
 let TOKEN = '';
 let settings = null;
@@ -325,6 +431,9 @@ const $ = id => document.getElementById(id);
 // (например market), и админка становилась белой — это и была «тема снова
 // светлая». Витрина при этом остаётся в живом превью справа.
 const ADMIN_THEMES = {
+  glass: { label:'Liquid Glass', vars:{
+    '--bg':'#0b0f17','--surface':'#1a2333','--surface-2':'#242f45','--text':'#f4f6fb','--muted':'#98a2b3',
+    '--accent':'#0a84ff','--accent-2':'#64d2ff','--danger':'#ff453a','--on-accent':'#ffffff' }},
   graphite: { label:'Графит', vars:{
     '--bg':'#0d0d0d','--surface':'#161616','--surface-2':'#202020','--text':'#f2efe6','--muted':'#8a8880',
     '--accent':'#e8341c','--accent-2':'#f2c94c','--danger':'#e8341c','--on-accent':'#ffffff' }},
@@ -340,19 +449,19 @@ const ADMIN_THEMES = {
 };
 const LS_ADMIN_THEME = 'admin_theme_v1';
 function getAdminTheme(){
-  try{ const v = localStorage.getItem(LS_ADMIN_THEME); return ADMIN_THEMES[v] ? v : 'graphite'; }
-  catch(e){ return 'graphite'; }
+  try{ const v = localStorage.getItem(LS_ADMIN_THEME); return ADMIN_THEMES[v] ? v : 'glass'; }
+  catch(e){ return 'glass'; }
 }
 function applyAdminTheme(name, persist = true){
-  const t = ADMIN_THEMES[name] || ADMIN_THEMES.graphite;
+  const t = ADMIN_THEMES[name] || ADMIN_THEMES.glass;
   const st = document.documentElement.style;
   Object.entries(t.vars).forEach(([k, v]) => st.setProperty(k, v));
   st.colorScheme = name === 'light' ? 'light' : 'dark';
   if(persist) try{ localStorage.setItem(LS_ADMIN_THEME, name); }catch(e){}
 }
 // применяем до логина, чтобы экран входа сразу был в выбранной теме
-try{ applyAdminTheme(localStorage.getItem(LS_ADMIN_THEME) || 'graphite', false); }
-catch(e){ applyAdminTheme('graphite', false); }
+try{ applyAdminTheme(localStorage.getItem(LS_ADMIN_THEME) || 'glass', false); }
+catch(e){ applyAdminTheme('glass', false); }
 
 // ---------- доступ к настройкам по пути 'theme.accent' ----------
 function getPath(obj, path){ return path.split('.').reduce((o,k)=> (o==null?o:o[k]), obj); }

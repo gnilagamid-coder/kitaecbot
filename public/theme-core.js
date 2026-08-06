@@ -9,6 +9,17 @@
 }(typeof self !== 'undefined' ? self : this, function () {
 
 const THEME_PRESETS = {
+  // Язык iOS 26 «Liquid Glass»: глубокий тёмный холст с мягким северным
+  // сиянием, полупрозрачные матовые панели с преломлением (backdrop-filter),
+  // волосяные светлые грани и крупные радиусы. Маркер glass:true включает
+  // стеклянный CSS-слой витрины (см. index.html) — без него пресет был бы
+  // просто палитрой. Дефолтный пресет новых магазинов.
+  glass: {
+    label: 'Liquid Glass',
+    bg: '#0b0f17', surface: '#1a2333', surface2: '#242f45',
+    text: '#f4f6fb', muted: '#98a2b3', accent: '#0a84ff', accent2: '#64d2ff',
+    radius: 24, borderWidth: 1, fontDisplay: 'Inter', uppercase: false, glass: true,
+  },
   brutalist: {
     label: 'Бруталист',
     bg: '#0d0d0d', surface: '#161616', surface2: '#202020',
@@ -152,6 +163,8 @@ function resolveTheme(theme) {
     uppercase: t.uppercase != null ? !!t.uppercase : preset.uppercase,
     fontScale: Number(t.fontScale) || 100,
     density: t.density || 'normal',
+    // структурный признак пресета: витрина включает слой матового стекла
+    glass: !!preset.glass,
   };
 }
 

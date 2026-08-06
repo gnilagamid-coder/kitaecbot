@@ -9,8 +9,8 @@
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <!-- ?v= бампается при релизе: страхует от промежуточных прокси, которые
      игнорируют no-cache и держат старый shared.js поверх новой разметки -->
-<script src="/theme-core.js?v=2.4"></script>
-<script src="/shared.js?v=2.4"></script>
+<script src="/theme-core.js?v=2.5"></script>
+<script src="/shared.js?v=2.5"></script>
 <style>
   :root{
     /* дефолты до загрузки настроек — чтобы первый кадр не был белым «мигом» */
@@ -591,6 +591,151 @@
        широком мониторе он уезжает от каталога в пустоту */
     .fab-cart{right:max(16px,calc(50vw - 660px + 16px))}
   }
+
+  /* ============================================================
+     LIQUID GLASS — язык iOS 26 (пресет «glass», класс ставит
+     сервер при первом кадре и applyTheme при смене темы).
+     Поверхности — матовое стекло с преломлением, фон — мягкое
+     северное сияние из акцентных цветов, грани волосяные и
+     светлые, на кнопках спекулярный блик сверху. !important у
+     переменных нужен потому, что applyTheme пишет их инлайном
+     на <html> — инлайн бьёт любую таблицу стилей, кроме
+     помеченного important. ============================================================ */
+  body.glass{
+    --surface:rgba(255,255,255,.07) !important;
+    --surface-2:rgba(255,255,255,.12) !important;
+    --g-line:rgba(255,255,255,.14);
+    --g-hi:rgba(255,255,255,.22);
+    --g-blur:blur(22px) saturate(1.8);
+  }
+  /* аура: три размытых пятна акцентных цветов за контентом.
+     z-index:-1 рисует их поверх фона body, но под всем остальным;
+     fixed — сияние остаётся на месте, пока лента прокручивается,
+     и стеклу всегда есть что преломлять. */
+  body.glass::before{
+    content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;
+    background:
+      radial-gradient(60% 44% at 12% -6%, color-mix(in srgb, var(--accent) 26%, transparent), transparent 70%),
+      radial-gradient(52% 40% at 105% 12%, color-mix(in srgb, var(--accent-2) 20%, transparent), transparent 72%),
+      radial-gradient(70% 54% at 50% 118%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 74%);
+  }
+
+  /* стекло: полупрозрачный фон + преломление. Крупным «хромовым»
+     поверхностям — blur, карточки товаров остаются просто
+     полупрозрачными (blur на десятках карточек душит слабые
+     Android-WebView). */
+  body.glass header,
+  body.glass .sheet,
+  body.glass .search,
+  body.glass .fab-cart,
+  body.glass .toast,
+  body.glass .pay-card{
+    -webkit-backdrop-filter:var(--g-blur);
+    backdrop-filter:var(--g-blur);
+  }
+
+  /* шапка: стекло поверх ауры вместо глухого фона */
+  body.glass header{
+    background:color-mix(in srgb, var(--bg) 55%, transparent);
+    border-bottom:1px solid var(--g-line);
+  }
+  body.glass .marquee{
+    background:color-mix(in srgb, var(--accent) 80%, transparent);
+    -webkit-backdrop-filter:blur(14px) saturate(1.4);
+    backdrop-filter:blur(14px) saturate(1.4);
+  }
+
+  /* карточки товаров: матовое стекло с бликом по верхней грани */
+  body.glass .card,
+  body.glass .skeleton{
+    border:1px solid var(--g-line);
+    box-shadow:inset 0 1px 0 var(--g-hi), 0 6px 22px rgba(0,0,0,.28);
+  }
+  body.glass .card-img{border-bottom:1px solid rgba(255,255,255,.08)}
+  /* жёсткие офсетные тени и повороты других cardStyle со стеклом не живут */
+  body.glass .card-flat{border-color:transparent;box-shadow:none}
+  body.glass .card-shadow{border-color:var(--g-line);box-shadow:inset 0 1px 0 var(--g-hi), 0 6px 22px rgba(0,0,0,.28)}
+  body.glass .card-sticker{transform:none;box-shadow:inset 0 1px 0 var(--g-hi), 0 6px 22px rgba(0,0,0,.28)}
+
+  /* чипы и кнопки — капсулы, как в iOS */
+  body.glass .cat-chip{
+    border-radius:999px;border-color:var(--g-line);background:rgba(255,255,255,.06);
+  }
+  body.glass .cat-chip.active{
+    box-shadow:0 4px 16px color-mix(in srgb, var(--accent) 45%, transparent), inset 0 1px 0 rgba(255,255,255,.3);
+  }
+  body.glass .checkout-btn,
+  body.glass .empty-action,
+  body.glass .promo-apply{border-radius:999px}
+  /* спекулярный блик: полупрозрачный белый градиент поверх акцентного фона,
+     верхняя грань подсвечена — кнопка выглядит объёмной, как системная */
+  body.glass .checkout-btn,
+  body.glass .empty-action{
+    background-image:linear-gradient(180deg, rgba(255,255,255,.32), rgba(255,255,255,.06) 46%, rgba(255,255,255,0));
+    box-shadow:0 8px 24px color-mix(in srgb, var(--accent) 40%, transparent), inset 0 1px 0 rgba(255,255,255,.35);
+  }
+  body.glass .card-add{border-radius:50%;box-shadow:inset 0 1px 0 rgba(255,255,255,.3)}
+  body.glass .icon-btn{border:1px solid var(--g-line)}
+  body.glass .fab-cart{
+    border-radius:50%;width:58px;height:58px;
+    background-image:linear-gradient(180deg, rgba(255,255,255,.3), rgba(255,255,255,0) 55%);
+    box-shadow:0 10px 30px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.35);
+  }
+  body.glass .fab-badge{border-radius:999px}
+
+  /* шторки: стекло со скруглёнными верхними углами и «ручкой»-полоской.
+     Косой срез diagonal со стеклом несовместим — гасим его здесь же. */
+  body.glass .sheet{
+    background:color-mix(in srgb, var(--bg) 62%, transparent);
+    border-top:1px solid var(--g-hi);
+    border-radius:26px 26px 0 0;
+    clip-path:none;
+    box-shadow:0 -12px 44px rgba(0,0,0,.4);
+  }
+  body.glass .sheet::before{
+    content:'';position:absolute;top:9px;left:50%;transform:translateX(-50%);
+    width:38px;height:4px;border-radius:2px;background:rgba(255,255,255,.32);z-index:2;
+  }
+  body.glass.diagonal .featured-badge{transform:none}
+  body.glass .featured-badge{box-shadow:none;border-radius:999px;margin-left:8px}
+  body.glass .overlay{background:rgba(8,10,16,.45);-webkit-backdrop-filter:blur(5px);backdrop-filter:blur(5px)}
+
+  /* поиск, сортировка, поля формы, счётчик — стеклянные капсулы/плитки */
+  body.glass .search{border:1px solid var(--g-line);box-shadow:inset 0 1px 0 var(--g-hi)}
+  body.glass .sort-select{border:1px solid var(--g-line)}
+  body.glass .qty{border:1px solid var(--g-line)}
+
+  /* toast — летающая стеклянная пилюля */
+  body.glass .toast{
+    border-radius:999px;border:1px solid var(--g-line);
+    background:color-mix(in srgb, var(--bg) 60%, transparent);
+  }
+  body.glass .pay-card{
+    background:color-mix(in srgb, var(--bg) 72%, transparent);
+    border:1px solid var(--g-line);
+    box-shadow:inset 0 1px 0 var(--g-hi), 0 18px 50px rgba(0,0,0,.45);
+  }
+
+  /* десктопная шторка-диалог тоже стеклянная и скруглена со всех сторон */
+  @media (min-width:900px){
+    body.glass .overlay .sheet{border:1px solid var(--g-line);border-radius:26px}
+    body.glass .overlay .sheet::before{display:none}
+  }
+
+  /* доступность: если ОС просит меньше прозрачности — возвращаем
+     глухие поверхности и убираем преломление. Ауру гасим целиком. */
+  @media (prefers-reduced-transparency: reduce){
+    body.glass::before{display:none}
+    body.glass header{background:var(--bg)}
+    body.glass .sheet{background:var(--bg)}
+    body.glass .toast{background:var(--surface-2)}
+    body.glass header, body.glass .sheet, body.glass .search,
+    body.glass .fab-cart, body.glass .toast, body.glass .pay-card,
+    body.glass .overlay, body.glass .marquee{
+      -webkit-backdrop-filter:none;backdrop-filter:none;
+    }
+  }
+
   @media (prefers-reduced-motion:reduce){ *{animation-duration:.01ms!important;transition-duration:.01ms!important} }
 </style>
 <style id="customCss"></style>

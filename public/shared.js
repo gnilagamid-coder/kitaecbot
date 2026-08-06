@@ -36,6 +36,11 @@ function applyTheme(theme, rootEl) {
   set('--fs', (r.fontScale / 100).toFixed(2));
   set('--gap', (DENSITY[r.density] || 1).toFixed(2));
   set('--caps', r.uppercase ? 'uppercase' : 'none');
+  // Класс стеклянного слоя живёт на body — туда же его кладёт серверный
+  // bootClass при первом кадре, поэтому переключаем именно body (в превью
+  // админки это body внутри iframe). Раньше класса не было вовсе.
+  const classEl = (document.body && (el === document.documentElement)) ? document.body : el;
+  if (classEl && classEl.classList) classEl.classList.toggle('glass', !!r.glass);
   loadFont(r.fontDisplay);
   return r;
 }

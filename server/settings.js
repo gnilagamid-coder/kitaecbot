@@ -19,15 +19,18 @@ const DEFAULTS = {
   },
 
   // --- тема оформления ---
+  // Пустая строка / null в radius, borderWidth, fontDisplay, uppercase значат
+  // «взять из пресета» (см. resolveTheme). Дефолтный пресет — glass
+  // (Liquid Glass), поэтому жёсткие значения брутализма здесь не живут.
   theme: {
-    preset: 'brutalist',    // см. THEME_PRESETS в public/theme-core.js
+    preset: 'glass',        // см. THEME_PRESETS в public/theme-core.js
     colorScheme: 'dark',    // dark | light | telegram (следовать теме клиента)
     bg: '', surface: '', surface2: '', text: '', muted: '', accent: '', accent2: '',
-    radius: 0,              // px
-    borderWidth: 1,         // px
-    fontDisplay: 'Oswald',
+    radius: '',             // px; пусто = из пресета
+    borderWidth: '',        // px; пусто = из пресета
+    fontDisplay: '',        // пусто = из пресета
     fontScale: 100,         // %
-    uppercase: true,        // капслок в заголовках/кнопках
+    uppercase: null,        // капслок в заголовках/кнопках; null = из пресета
     density: 'normal',      // compact | normal | roomy
     cardStyle: 'bordered',  // bordered | flat | shadow | sticker
     gridColumns: 2,         // колонок в сетке на телефоне: 1 | 2
@@ -36,7 +39,7 @@ const DEFAULTS = {
     grain: false,           // зернистая плёнка поверх фона
     marquee: false,         // бегущая строка под шапкой
     marqueeText: '',
-    diagonal: true,         // косые срезы у шитов/бейджей (авангард)
+    diagonal: false,        // косые срезы у шитов/бейджей (авангард)
     customCss: '',
   },
 
@@ -166,7 +169,10 @@ const DEFAULTS = {
 // ---------- нормализация ----------
 const str = (v, fb, max) => String(v === undefined || v === null ? fb : v).slice(0, max);
 const bool = (v, fb) => (v === undefined ? !!fb : !!v);
+// Пустая строка и null считаются «не задано» и возвращают fb — так тема
+// может наследовать radius/borderWidth из пресета, а не зашивать 0.
 const num = (v, fb, min, max) => {
+  if (v === '' || v === undefined || v === null) return fb;
   const n = Number(v);
   if (!Number.isFinite(n)) return fb;
   return Math.min(max, Math.max(min, n));
@@ -213,16 +219,16 @@ function sanitize(input) {
       headerStyle: oneOf(b.headerStyle, ['bar', 'banner', 'minimal'], 'bar'),
     },
     theme: {
-      preset: str(t.preset, 'brutalist', 24),
+      preset: str(t.preset, 'glass', 24),
       colorScheme: oneOf(t.colorScheme, ['dark', 'light', 'telegram'], 'dark'),
       bg: str(t.bg, '', 24), surface: str(t.surface, '', 24), surface2: str(t.surface2, '', 24),
       text: str(t.text, '', 24), muted: str(t.muted, '', 24),
       accent: str(t.accent, '', 24), accent2: str(t.accent2, '', 24),
-      radius: num(t.radius, 0, 0, 40),
-      borderWidth: num(t.borderWidth, 1, 0, 6),
-      fontDisplay: str(t.fontDisplay, 'Oswald', 40),
+      radius: num(t.radius, '', 0, 40),
+      borderWidth: num(t.borderWidth, '', 0, 6),
+      fontDisplay: str(t.fontDisplay, '', 40),
       fontScale: num(t.fontScale, 100, 80, 130),
-      uppercase: bool(t.uppercase, true),
+      uppercase: t.uppercase == null ? null : !!t.uppercase,
       density: oneOf(t.density, ['compact', 'normal', 'roomy'], 'normal'),
       cardStyle: oneOf(t.cardStyle, ['bordered', 'flat', 'shadow', 'sticker'], 'bordered'),
       gridColumns: oneOf(num(t.gridColumns, 2, 1, 2), [1, 2], 2),
