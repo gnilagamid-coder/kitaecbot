@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Платформа магазинов — регистрация</title>
+<style>
+  :root{
+    --bg:#0b0f17; --text:#f4f6fb; --muted:#98a2b3;
+    --accent:#0a84ff; --accent-2:#64d2ff; --danger:#ff453a;
+    --line:rgba(255,255,255,.14); --hi:rgba(255,255,255,.22);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%}
+  body{
+    background:var(--bg); color:var(--text);
+    font:16px/1.5 -apple-system,BlinkMacSystemFont,'Inter','Segoe UI',Roboto,sans-serif;
+    display:flex; align-items:center; justify-content:center; padding:24px;
+  }
+  /* Аура — мягкие световые пятна позади стекла */
+  body::before{
+    content:''; position:fixed; inset:0; z-index:-1; pointer-events:none;
+    background:
+      radial-gradient(46rem 34rem at 12% -6%, color-mix(in srgb, var(--accent) 26%, transparent), transparent 60%),
+      radial-gradient(40rem 30rem at 108% 18%, color-mix(in srgb, var(--accent-2) 20%, transparent), transparent 62%),
+      radial-gradient(46rem 36rem at 55% 118%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 66%);
+  }
+  .card{
+    width:100%; max-width:430px; border-radius:24px; padding:28px;
+    background:rgba(255,255,255,.07); border:1px solid var(--line);
+    backdrop-filter:blur(22px) saturate(1.8); -webkit-backdrop-filter:blur(22px) saturate(1.8);
+    box-shadow:inset 0 1px 0 var(--hi), 0 18px 50px rgba(0,0,0,.45);
+  }
+  h1{margin:0 0 6px; font-size:24px; letter-spacing:-.02em}
+  .sub{margin:0 0 22px; color:var(--muted); font-size:14px}
+  label{display:block; margin:14px 0 6px; font-size:13px; color:var(--muted)}
+  input{
+    width:100%; padding:12px 14px; border-radius:13px; color:var(--text);
+    background:rgba(255,255,255,.08); border:1px solid var(--line);
+    font:inherit; outline:none;
+  }
+  input:focus{border-color:color-mix(in srgb, var(--accent) 70%, transparent);
+    box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)}
+  .sub-wrap{display:flex; align-items:center; gap:8px}
+  .sub-wrap input{flex:1}
+  .domain{color:var(--muted); font-size:14px; white-space:nowrap}
+  button{
+    margin-top:22px; width:100%; padding:13px 16px; border-radius:14px;
+    border:1px solid rgba(255,255,255,.18); color:#fff; font:inherit; font-weight:600;
+    background:linear-gradient(180deg, color-mix(in srgb, var(--accent) 100%, transparent), color-mix(in srgb, var(--accent) 78%, #000));
+    background-image:linear-gradient(180deg, rgba(255,255,255,.32), rgba(255,255,255,0) 55%);
+    background-color:var(--accent); cursor:pointer;
+    box-shadow:0 8px 24px color-mix(in srgb, var(--accent) 40%, transparent), inset 0 1px 0 rgba(255,255,255,.35);
+  }
+  button:disabled{opacity:.6; cursor:default}
+  .msg{margin-top:14px; font-size:14px; min-height:20px}
+  .msg.err{color:var(--danger)}
+  .msg.ok{color:#30d158}
+  .result{display:none; margin-top:18px; padding:16px; border-radius:16px;
+    background:rgba(255,255,255,.06); border:1px solid var(--line); font-size:14px}
+  .result a{color:var(--accent-2)}
+  .token{display:block; margin-top:8px; padding:10px 12px; border-radius:10px;
+    background:rgba(0,0,0,.35); font-family:ui-monospace,Menlo,Consolas,monospace;
+    word-break:break-all; user-select:all}
+  .hint{margin-top:10px; color:var(--muted); font-size:12.5px}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Свой магазин за минуту</h1>
+    <p class="sub">Витрина в Telegram Mini Apps + админка. Живой магазин сразу после регистрации.</p>
+
+    <form id="regForm">
+      <label for="shopName">Название магазина</label>
+      <input id="shopName" name="shopName" maxlength="190" placeholder="Например: Кофейня «Зерно»" required>
+
+      <label for="subdomain">Адрес витрины</label>
+      <div class="sub-wrap">
+        <input id="subdomain" name="subdomain" required autocomplete="off"
+               pattern="[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?" placeholder="myshop">
+        <span class="domain" id="domainSuffix">.example.ru</span>
+      </div>
+
+      <label for="email">E-mail</label>
+      <input id="email" name="email" type="email" maxlength="190" placeholder="you@mail.ru">
+
+      <label for="botToken">Токен бота (необязательно)</label>
+      <input id="botToken" name="botToken" maxlength="200" placeholder="Токен от @BotFather — можно добавить позже">
+
+      <button id="submitBtn" type="submit">Создать магазин</button>
+      <div class="msg" id="msg"></div>
+    </form>
+
+    <div class="result" id="result">
+      <div>Витрина: <a id="shopUrl" target="_blank" rel="noopener"></a></div>
+      <div style="margin-top:10px">Пароль админки — сохраните, показываем один раз:</div>
+      <span class="token" id="adminToken"></span>
+      <div class="hint">Админка откроется по адресу магазина: /admin.html</div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  var form = document.getElementById('regForm');
+  var msg = document.getElementById('msg');
+  var btn = document.getElementById('submitBtn');
+
+  // Суффикс домена — с того же заголовка, что видит сервер: host без порта.
+  var host = location.hostname.toLowerCase();
+  document.getElementById('domainSuffix').textContent = '.' + host;
+
+  // Поддомен вводим строчными без «хвостов»
+  var sub = document.getElementById('subdomain');
+  sub.addEventListener('input', function () {
+    sub.value = sub.value.toLowerCase().replace(/[^a-z0-9-]/g, '');
+  });
+
+  form.addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    msg.className = 'msg'; msg.textContent = '';
+    btn.disabled = true; btn.textContent = 'Создаём…';
+    try {
+      var res = await fetch('/api/platform/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          shopName: document.getElementById('shopName').value,
+          subdomain: sub.value,
+          email: document.getElementById('email').value,
+          botToken: document.getElementById('botToken').value,
+        }),
+      });
+      var data = await res.json().catch(function () { return {}; });
+      if (!res.ok || !data.ok) throw new Error(data.error || 'регистрация не удалась');
+      form.style.display = 'none';
+      var r = document.getElementById('result');
+      r.style.display = 'block';
+      document.getElementById('shopUrl').href = data.url;
+      document.getElementById('shopUrl').textContent = data.url.replace(/^https:\/\//, '');
+      document.getElementById('adminToken').textContent = data.adminToken;
+    } catch (e) {
+      msg.className = 'msg err'; msg.textContent = e.message;
+      btn.disabled = false; btn.textContent = 'Создать магазин';
+    }
+  });
+})();
+</script>
+</body>
+</html>

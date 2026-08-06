@@ -35,41 +35,84 @@ const ADMIN_CHAT_IDS = String(process.env.ADMIN_CHAT_IDS || '')
   .split(',').map(s => Number(s.trim()))
   .filter(n => Number.isFinite(n) && n !== 0);
 
-if (!ADMIN_TOKEN) {
+// Режим платформы: один процесс обслуживает много магазинов, каждый — на
+// своём поддомене, реестр и секреты в MySQL (схема из Stage 2). Без
+// MULTITENANT=1 всё работает по-файловому, ровно как раньше.
+const MULTI = String(process.env.MULTITENANT || '').trim() === '1';
+const MULTI_DOMAIN = String(process.env.MULTITENANT_DOMAIN || '').toLowerCase().trim();
+const MULTI_ROOT = process.env.MULTITENANT_DATA_ROOT || path.join(process.cwd(), 'data', 'shops');
+const SECRET_KEY = process.env.SECRET_KEY || '';
+
+if (!MULTI && !ADMIN_TOKEN) {
   console.error('ADMIN_TOKEN не задан в .env — админка была бы открыта всем. Выхожу.');
   process.exit(1);
 }
+if (MULTI) {
+  const problems = [];
+  const dbc = require('./db').dbConfigFromEnv();
+  if (!dbc.host || !dbc.database) problems.push('MYSQL_HOST/MYSQL_DATABASE');
+  if (!MULTI_DOMAIN) problems.push('MULTITENANT_DOMAIN');
+  if (SECRET_KEY.length < 12) problems.push('SECRET_KEY (от 12 символов)');
+  if (problems.length) {
+    console.error(`MULTITENANT=1 требует: ${problems.join(', ')}. Выхожу.`);
+    process.exit(1);
+  }
+}
 
-// Единственный пока арендатор, собранный из окружения — ровно то же, что
-// модули раньше читали каждый сам за себя. Когда появится роутинг по домену,
-// здесь встанет реестр арендаторов, а обработчики ниже не изменятся: они уже
-// работают с объектом, а не с глобальным состоянием.
-const tenant = createTenant({
-  id: process.env.SHOP_ID || '',
-  dataDir: process.env.DATA_DIR,
-  botToken: process.env.BOT_TOKEN,
-  adminToken: ADMIN_TOKEN,
-  publicUrl: process.env.PUBLIC_URL,
-  apiBase: process.env.TELEGRAM_API_BASE,
-  botMode: process.env.BOT_MODE,
-  adminChatIds: ADMIN_CHAT_IDS,
+// ---------- арендаторы ----------
+// Файловый режим: арендатор ровно один и собирается из окружения, как прежде.
+// Режим платформы: магазины берутся из реестра (MySQL), а запрос выбирает
+// себе арендатора по поддомену (als.run в createServer ниже). Обработчики
+// разницы не видят: короткие имена резолвятся в текущего арендатора.
+const { AsyncLocalStorage } = require('node:async_hooks');
+const als = new AsyncLocalStorage();
+
+let solo = null;
+if (!MULTI) {
+  solo = createTenant({
+    id: process.env.SHOP_ID || '',
+    dataDir: process.env.DATA_DIR,
+    botToken: process.env.BOT_TOKEN,
+    adminToken: ADMIN_TOKEN,
+    publicUrl: process.env.PUBLIC_URL,
+    apiBase: process.env.TELEGRAM_API_BASE,
+    botMode: process.env.BOT_MODE,
+    adminChatIds: ADMIN_CHAT_IDS,
+  });
+
+  // Резервные копии папки данных: снимки по расписанию и вручную из админки.
+  // BACKUP_DIR не задан — копии ложатся в backups/ рядом с папкой данных.
+  solo.backup = createBackupManager({
+    dataDir: solo.store.DATA_DIR,
+    backupsRoot: process.env.BACKUP_DIR,
+    tenantId: solo.id || 'shop',
+    store: solo.store,
+  });
+}
+
+function currentTenant() {
+  const s = als.getStore();
+  return (s && s.tenant) || solo;
+}
+
+// Короткие имена — теперь прокси к текущему арендатору запроса. Все фабрики
+// (store/orders/bot/telegram/backup) собраны замыканиями без this, так что
+// прокидка вызовов через прокси безопасна, а у обработчиков не меняется ни строки.
+const liveOf = key => new Proxy({}, {
+  get(_t, prop) {
+    const t = currentTenant();
+    const owner = t && t[key];
+    const v = owner ? owner[prop] : undefined;
+    return typeof v === 'function' ? v.bind(owner) : v;
+  },
 });
-
-// Короткие имена, чтобы не переписывать полторы тысячи строк обработчиков.
-// На следующем этапе эти строки заменит выбор арендатора по домену запроса.
-const store = tenant.store;
-const ordersRepo = tenant.orders;
-const bot = tenant.bot;
-const { tgApi, validateInitData, BOT_TOKEN, API_BASE } = tenant.telegram;
-
-// Резервные копии папки данных: снимки по расписанию и вручную из админки.
-// BACKUP_DIR не задан — копии ложатся в backups/ рядом с папкой данных.
-const backup = createBackupManager({
-  dataDir: store.DATA_DIR,
-  backupsRoot: process.env.BACKUP_DIR,
-  tenantId: tenant.id || 'shop',
-  store,
-});
+const store = liveOf('store');
+const ordersRepo = liveOf('orders');
+const bot = liveOf('bot');
+const backup = liveOf('backup');
+const tg = liveOf('telegram');
+const tgApi = (...a) => currentTenant().telegram.tgApi(...a);
+const validateInitData = (...a) => currentTenant().telegram.validateInitData(...a);
 
 // ---------- утилиты ----------
 const TEXTUAL = new Set(['.html', '.js', '.css', '.json', '.svg']);
@@ -118,17 +161,17 @@ function readBody(req) {
 // при его создании (см. tenant.js), здесь только сверка.
 function tokenOk(req, given = String(req.headers['x-admin-token'] || '')) {
   const hash = crypto.createHash('sha256').update(given).digest();
-  return crypto.timingSafeEqual(hash, tenant.adminHash);
+  return crypto.timingSafeEqual(hash, currentTenant().adminHash);
 }
 
-// Админка из Telegram выдаёт билеты вместо вечного ADMIN_TOKEN: подпись на
-// ключе ADMIN_TOKEN + срок жизни. Таблицы сессий нет — отзыв происходит сам:
-// билет протух, владелец выпал из ADMIN_CHAT_IDS, ADMIN_TOKEN поменялся.
+// Админка из Telegram выдаёт билеты вместо вечного пароля: подпись на
+// ключе арендатора (sessionKey) + срок жизни. Таблицы сессий нет — отзыв
+// происходит сам: билет протух, владелец выпал из списка допуска.
 const ADMIN_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 function issueAdminSession(userId) {
   const exp = Date.now() + ADMIN_SESSION_TTL_MS;
   const payload = `a1.${userId}.${exp}`;
-  const sig = crypto.createHmac('sha256', ADMIN_TOKEN).update(payload).digest('hex');
+  const sig = crypto.createHmac('sha256', currentTenant().sessionKey).update(payload).digest('hex');
   return `${payload}.${sig}`;
 }
 function adminSessionOk(raw) {
@@ -137,8 +180,8 @@ function adminSessionOk(raw) {
   const [, uid, exp, sig] = m;
   if (Number(exp) < Date.now()) return false;
   // выпавших из списка допуска не пускаем даже с живой подписью
-  if (!ADMIN_CHAT_IDS.includes(Number(uid))) return false;
-  const expected = crypto.createHmac('sha256', ADMIN_TOKEN).update(`a1.${uid}.${exp}`).digest('hex');
+  if (!currentTenant().adminChatIds.includes(Number(uid))) return false;
+  const expected = crypto.createHmac('sha256', currentTenant().sessionKey).update(`a1.${uid}.${exp}`).digest('hex');
   const a = Buffer.from(expected, 'utf8');
   const b = Buffer.from(sig, 'utf8');
   return a.length === b.length && crypto.timingSafeEqual(a, b);
@@ -155,7 +198,7 @@ function rateLimit(ip, max, windowMs) {
 }
 setInterval(() => { const now = Date.now(); for (const [k, v] of hits) if (now - v.start > 600000) hits.delete(k); }, 600000).unref();
 
-const getSettings = () => tenant.settings();
+const getSettings = () => currentTenant().settings();
 
 // ---------- состояние VPS (карточка «Сервер» в админке) ----------
 // Всё читается из ядра/proc без внешних зависимостей; «тяжёлые» вызовы
@@ -564,7 +607,7 @@ async function handleApi(req, res, url) {
     const file = await tgApi('getFile', { file_id: fileId });
     const fp = file && file.result && file.result.file_path;
     if (!fp) { res.writeHead(404); return res.end('no file'); }
-    const img = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${fp}`);
+    const img = await fetch(`https://api.telegram.org/file/bot${tg.BOT_TOKEN}/${fp}`);
     const buf = Buffer.from(await img.arrayBuffer());
     res.writeHead(200, { 'Content-Type': img.headers.get('content-type') || 'image/jpeg', 'Cache-Control': 'public, max-age=3600' });
     return res.end(buf);
@@ -788,7 +831,7 @@ async function handleApi(req, res, url) {
     try {
       result = await provider.createPayment(s.payments.creds, order, {
         currencyCode: s.payments.currencyCode,
-        publicUrl: tenant.publicUrl,
+        publicUrl: currentTenant().publicUrl,
         returnToken,
       });
     } catch (e) {
@@ -892,7 +935,7 @@ async function handleApi(req, res, url) {
     }
     let body; try { body = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
     const user = validateInitData(String(body.initData || ''));
-    if (!user || !ADMIN_CHAT_IDS.includes(Number(user.id))) {
+    if (!user || !currentTenant().adminChatIds.includes(Number(user.id))) {
       authguard.fail(ip);
       return json(res, 401, { error: 'unauthorized' });
     }
@@ -1076,7 +1119,7 @@ async function handleApi(req, res, url) {
         ordersByStatus: o.byStatus,
         views: Object.values(views).reduce((a, b) => a + b, 0),
         users: Object.keys(store.read('users', {})).length,
-        botConnected: !!BOT_TOKEN,
+        botConnected: !!tg.BOT_TOKEN,
       });
     }
 
@@ -1092,14 +1135,14 @@ async function handleApi(req, res, url) {
       const checks = [];
       const add = (id, title, ok, detail, fix) => checks.push({ id, title, ok, detail, fix });
 
-      add('token', 'Токен бота задан', !!BOT_TOKEN,
-        BOT_TOKEN ? 'BOT_TOKEN прочитан из .env' : 'BOT_TOKEN пуст',
+      add('token', 'Токен бота задан', !!tg.BOT_TOKEN,
+        tg.BOT_TOKEN ? 'BOT_TOKEN прочитан из .env' : 'BOT_TOKEN пуст',
         'Впишите токен от @BotFather в /opt/tg-shop/.env и перезапустите: systemctl restart tg-shop');
 
-      if (BOT_TOKEN) {
+      if (tg.BOT_TOKEN) {
         const me = await tgApi('getMe', {}, { retries: 0, timeoutMs: 12000 });
         if (me.ok) {
-          add('api', `Связь с Telegram (@${me.result.username})`, true, `API: ${API_BASE}`, '');
+          add('api', `Связь с Telegram (@${me.result.username})`, true, `API: ${tg.API_BASE}`, '');
         } else if (me.network) {
           add('api', 'Связь с Telegram', false, me.description,
             'Сервер не может достучаться до api.telegram.org. Обычно это блокировка у хостера. ' +
@@ -1111,8 +1154,8 @@ async function handleApi(req, res, url) {
         }
       }
 
-      add('publicUrl', 'PUBLIC_URL настроен', /^https:\/\//i.test(tenant.publicUrl),
-        tenant.publicUrl || 'не задан',
+      add('publicUrl', 'PUBLIC_URL настроен', /^https:\/\//i.test(currentTenant().publicUrl),
+        currentTenant().publicUrl || 'не задан',
         'Без https-адреса Telegram не откроет мини-апп и не отдаст фото при публикации в канал');
 
       // Отдельная проверка кнопки «Открыть»: web_app-кнопки и кнопка меню
@@ -1144,7 +1187,7 @@ async function handleApi(req, res, url) {
           'Вкладка «Оплата» → заполните ключи мерчанта');
       }
 
-      return json(res, 200, { checks, apiBase: API_BASE, botMode: tenant.botMode || 'polling' });
+      return json(res, 200, { checks, apiBase: tg.API_BASE, botMode: currentTenant().botMode || 'polling' });
     }
 
     if (p === '/api/admin/payment-providers' && method === 'GET') {
@@ -1182,7 +1225,7 @@ async function handleApi(req, res, url) {
       }).slice(0, 1024);
 
       const payload = { chat_id: s.channel.channelId, reply_markup: { inline_keyboard: [[{ text: s.channel.postButtonText, url: link }]] } };
-      const publicBase = tenant.publicUrl;
+      const publicBase = currentTenant().publicUrl;
       let apiMethod = 'sendMessage';
       if (product.images && product.images[0] && publicBase) {
         apiMethod = 'sendPhoto';
@@ -1279,10 +1322,172 @@ function normalizeProduct(b) {
   };
 }
 
+// ---------- платформа (MULTITENANT=1) ----------
+// Реестр в MySQL, у каждого магазина свой поддомен и своя папка данных в
+// MULTI_ROOT. В файловом режиме вся секция молчит: переменные пусты.
+let registry = null;
+let platformDb = null;
+const tenantsBySub = new Map(); // subdomain -> tenant
+
+// Собирает арендатора из строки реестра. Токен бота расшифровывается;
+// не расшифровался (сменили SECRET_KEY) — магазин стартует без бота,
+// витрина и админка работают.
+function buildTenantFromRow(row) {
+  const { decryptSecret } = require('./secrets');
+  const dataDir = path.join(MULTI_ROOT, row.subdomain);
+  fs.mkdirSync(path.join(dataDir, 'images'), { recursive: true });
+
+  let botToken = '';
+  if (row.bot_token_enc) {
+    try {
+      botToken = decryptSecret(Buffer.from(row.bot_token_enc).toString('utf8'), SECRET_KEY);
+    } catch (e) {
+      console.error(`[platform] ${row.subdomain}: токен бота не расшифровался (${e.message}) — старт без бота`);
+    }
+  }
+
+  const t = createTenant({
+    id: `shop-${row.shop_id}`,
+    dataDir,
+    botToken,
+    adminToken: '',
+    adminHash: Buffer.from(String(row.admin_token_hash), 'hex'),
+    sessionKey: String(row.admin_token_hash), // свой ключ билетов у каждого магазина
+    publicUrl: `https://${row.subdomain}.${MULTI_DOMAIN}`,
+    apiBase: process.env.TELEGRAM_API_BASE,
+    botMode: process.env.BOT_MODE,
+    adminChatIds: Array.isArray(row.admin_chat_ids) ? row.admin_chat_ids : [],
+  });
+  t.subdomain = row.subdomain;
+  t.shopId = row.shop_id;
+  t.status = row.status;
+  t.backup = createBackupManager({
+    dataDir,
+    backupsRoot: process.env.BACKUP_DIR,
+    tenantId: row.subdomain,
+    store: t.store,
+  });
+  return t;
+}
+
+// shop1.example.ru -> арендатор shop1; www/голый домен -> null (это платформа).
+function resolveTenantByHost(hostRaw) {
+  if (!MULTI_DOMAIN) return null;
+  const host = String(hostRaw || '').toLowerCase().split(':')[0];
+  if (!host.endsWith('.' + MULTI_DOMAIN)) return null;
+  const sub = host.slice(0, -(MULTI_DOMAIN.length + 1));
+  if (!sub || sub.includes('.')) return null;
+  const t = tenantsBySub.get(sub);
+  return t && t.status === 'active' ? t : null;
+}
+
+function isPlatformHost(hostRaw) {
+  const host = String(hostRaw || '').toLowerCase().split(':')[0];
+  return host === MULTI_DOMAIN || host === `www.${MULTI_DOMAIN}`;
+}
+
+// Отдельный счётчик регистраций: общий rate-limit заказов здесь не место.
+const regHits = new Map();
+function regRateLimit(ip, max = 5, windowMs = 10 * 60 * 1000) {
+  const now = Date.now();
+  const rec = regHits.get(ip);
+  if (!rec || now - rec.start > windowMs) { regHits.set(ip, { start: now, n: 1 }); return true; }
+  rec.n += 1;
+  return rec.n <= max;
+}
+
+async function handlePlatform(req, res, url) {
+  const method = req.method;
+  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+
+  // Регистрация магазина: строки в реестре + папка данных + одноразовый
+  // пароль админки. Токен бота необязателен — можно добавить позже.
+  if (url.pathname === '/api/platform/register' && method === 'POST') {
+    if (!regRateLimit(ip)) return json(res, 429, { error: 'Слишком много регистраций — попробуйте позже' });
+    let body; try { body = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
+    const { provisionShop } = require('./provision');
+    let p;
+    try {
+      p = await provisionShop({
+        registry,
+        dataRoot: MULTI_ROOT,
+        subdomain: body.subdomain,
+        shopName: body.shopName,
+        email: body.email,
+        botToken: body.botToken,
+        secretKey: SECRET_KEY,
+      });
+    } catch (e) { return json(res, e.status || 400, { error: e.message }); }
+
+    const row = await registry.findShopBySubdomain(p.subdomain);
+    const t = buildTenantFromRow(row);
+    tenantsBySub.set(p.subdomain, t);
+    t.bot.start();
+    t.backup.start();
+    console.log(`[platform] зарегистрирован магазин ${p.subdomain} (${p.shopName})`);
+    return json(res, 200, { ok: true, subdomain: p.subdomain, url: t.publicUrl, adminToken: p.adminToken });
+  }
+
+  if (url.pathname === '/api/platform/shops' && method === 'GET') {
+    const rows = await registry.listActiveShops();
+    return json(res, 200, {
+      shops: rows.filter(r => r.status === 'active').map(r => ({
+        subdomain: r.subdomain, title: r.title, url: `https://${r.subdomain}.${MULTI_DOMAIN}`,
+      })),
+    });
+  }
+
+  return json(res, 404, { error: 'unknown platform endpoint' });
+}
+
+function servePlatform(res, url) {
+  if (url.pathname === '/' || url.pathname === '/index.html' || url.pathname === '/platform.html') {
+    const buf = fs.readFileSync(path.join(PUBLIC_DIR, 'platform.html'));
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Length': buf.length,
+      'Cache-Control': 'no-store',
+    });
+    return res.end(buf);
+  }
+  return json(res, 404, { error: 'not found' });
+}
+
+// Поднимает реестр и всех зарегистрированные магазины. Вызывается в listen:
+// пара запросов в окно загрузки получат «магазин не найден» — это нормально.
+async function bootPlatform() {
+  const { createDb, dbConfigFromEnv } = require('./db');
+  const { createMigrator } = require('./migrations');
+  const { createRegistry } = require('./registry');
+  platformDb = createDb(dbConfigFromEnv());
+  await createMigrator({ db: platformDb }).up(); // платформа всегда на последней схеме
+  registry = createRegistry(platformDb);
+  const rows = await registry.listActiveShops();
+  for (const row of rows) {
+    if (row.status !== 'active') continue;
+    const full = await registry.findShopBySubdomain(row.subdomain);
+    tenantsBySub.set(row.subdomain, buildTenantFromRow(full));
+  }
+}
+
 // ---------- сервер ----------
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
+    if (MULTI) {
+      // Голый домен — лендинг платформы и регистрация.
+      if (isPlatformHost(req.headers.host)) {
+        if (url.pathname.startsWith('/api/platform/')) return await handlePlatform(req, res, url);
+        return servePlatform(res, url);
+      }
+      const t = resolveTenantByHost(req.headers.host);
+      if (!t) return json(res, 404, { error: `магазин не найден — зарегистрируйтесь на ${MULTI_DOMAIN}` });
+      // Весь дальнейший код запроса видит «своего» арендатора через als.
+      return await als.run({ tenant: t }, async () => {
+        if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
+        return await serveStatic(req, res, url.pathname);
+      });
+    }
     if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
     return await serveStatic(req, res, url.pathname);
   } catch (e) {
@@ -1292,12 +1497,28 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`[web] http://${HOST}:${PORT}  (данные: ${store.DATA_DIR})`);
-  bot.start();
-  backup.start();
+server.listen(PORT, HOST, async () => {
+  if (MULTI) {
+    try {
+      await bootPlatform();
+    } catch (e) {
+      console.error('[platform] старт не удался:', e.message);
+      process.exit(1);
+    }
+    console.log(`[platform] http://${HOST}:${PORT}  (домен: ${MULTI_DOMAIN}, магазинов: ${tenantsBySub.size}, данные: ${MULTI_ROOT})`);
+    for (const t of tenantsBySub.values()) { t.bot.start(); t.backup.start(); }
+  } else {
+    console.log(`[web] http://${HOST}:${PORT}  (данные: ${solo.store.DATA_DIR})`);
+    solo.bot.start();
+    solo.backup.start();
+  }
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
-  process.on(sig, () => { bot.stop(); backup.stop(); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 3000); });
+  process.on(sig, () => {
+    const all = MULTI ? [...tenantsBySub.values()] : [solo];
+    for (const t of all) { t.bot.stop(); t.backup.stop(); }
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000);
+  });
 }

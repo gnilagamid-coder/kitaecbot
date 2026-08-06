@@ -25,6 +25,12 @@ function createTenant({
   dataDir,
   botToken = '',
   adminToken = '',
+  // Платформа хранит не сам пароль админки, а его sha256 — тогда хэш можно
+  // передать сюда и не светить пароль в процессах. Задан — берём его.
+  adminHash = null,
+  // Ключ подписи билетов админки из Telegram. По умолчанию ADMIN_TOKEN,
+  // у магазинов платформы — хэш пароля (свой у каждого, стабильный).
+  sessionKey = '',
   publicUrl = '',
   apiBase = DEFAULT_API_BASE,
   botMode = 'polling',
@@ -52,7 +58,10 @@ function createTenant({
     // timingSafeEqual требует равной длины буферов и бросает исключение при
     // разной, а токен может быть любым — в том числе кириллицей, где длина
     // в байтах не равна длине строки.
-    adminHash: crypto.createHash('sha256').update(String(adminToken)).digest(),
+    adminHash: adminHash
+      ? Buffer.from(adminHash)
+      : crypto.createHash('sha256').update(String(adminToken)).digest(),
+    sessionKey: sessionKey || adminToken,
   };
 
   // Бот создаётся последним: ему нужен уже собранный арендатор, потому что
