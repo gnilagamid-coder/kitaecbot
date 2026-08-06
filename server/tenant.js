@@ -35,8 +35,11 @@ function createTenant({
   apiBase = DEFAULT_API_BASE,
   botMode = 'polling',
   adminChatIds = [],
+  // Готовое хранилище (например, store-db в режиме платформы). Не задано —
+  // файловый стор на dataDir, как всегда.
+  store: givenStore = null,
 } = {}) {
-  const store = createStore(dataDir);
+  const store = givenStore || createStore(dataDir);
 
   const tenant = {
     id,

@@ -23,7 +23,7 @@ let available = false;
 
 const TABLES = [
   'schema_migrations', 'tenants', 'shops', 'shop_settings', 'products',
-  'product_images', 'images', 'orders', 'order_items', 'product_views',
+  'product_images', 'images', 'orders', 'order_items', 'product_views', 'shop_docs',
 ];
 
 test.before(async () => {
@@ -54,7 +54,7 @@ const skip = t => { if (!available) { t.skip('MySQL недоступен'); retu
 test('up() создаёт всю схему и фиксирует миграцию', async t => {
   if (skip(t)) return;
   const applied = await migrator.up();
-  assert.deepStrictEqual(applied, ['0001_core.sql']);
+  assert.deepStrictEqual(applied, ['0001_core.sql', '0002_shop_docs.sql']);
 
   const [rows] = await db.query('SHOW TABLES');
   const tables = rows.map(r => Object.values(r)[0]).sort();
@@ -65,7 +65,10 @@ test('повторный up() ничего не применяет (идемпо
   if (skip(t)) return;
   assert.deepStrictEqual(await migrator.up(), []);
   const status = await migrator.status();
-  assert.deepStrictEqual(status, [{ name: '0001_core.sql', state: 'applied' }]);
+  assert.deepStrictEqual(status, [
+    { name: '0001_core.sql', state: 'applied' },
+    { name: '0002_shop_docs.sql', state: 'applied' },
+  ]);
 });
 
 test('правленный файл применённой миграции отклоняется', async t => {
@@ -100,12 +103,16 @@ test('каскад: удаление арендатора вычищает ма�
     `INSERT INTO order_items (shop_id, order_id, pos, product_id, name, price, qty)
      VALUES (?, ?, 0, ?, 'Кружка', 500, 1)`,
     [shop.id, 1750000000000, prod.id]);
+  await db.query(
+    'INSERT INTO shop_docs (shop_id, doc, data) VALUES (?, ?, ?)',
+    [shop.id, 'settings', JSON.stringify({ brand: { shopName: 'Тест' } })]);
 
   await db.query('DELETE FROM tenants WHERE id = ?', [tenant.id]);
 
   for (const [table, col, val] of [
     ['shops', 'id', shop.id], ['products', 'id', prod.id],
     ['orders', 'shop_id', shop.id], ['order_items', 'shop_id', shop.id],
+    ['shop_docs', 'shop_id', shop.id],
   ]) {
     const [left] = await db.query(`SELECT 1 FROM \`${table}\` WHERE \`${col}\` = ?`, [val]);
     assert.strictEqual(left.length, 0, `${table} не вычистился каскадом`);

@@ -80,6 +80,7 @@ function createRegistry(db) {
   }
 
   return {
+    db,
     validateSubdomain,
     createTenant, createShop,
     findShopBySubdomain, listActiveShops,

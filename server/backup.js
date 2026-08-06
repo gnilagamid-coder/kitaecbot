@@ -304,4 +304,32 @@ function createBackupManager({ dataDir, backupsRoot, tenantId = 'shop', store = 
   };
 }
 
-module.exports = { createBackupManager, clampConfig, NAME_RE };
+// Заглушка для магазинов, чьи данные живут в MySQL (режим платформы).
+// Интерфейс повторяет createBackupManager, чтобы index.js и админка не
+// ветвились; снимки папки не применяются — источник правды теперь БД,
+// и её копии ведёт уже инфраструктура (dump/репликация), а не этот модуль.
+function createDisabledBackup(reason) {
+  const deny = () => {
+    throw Object.assign(new Error(reason), { status: 400 });
+  };
+  return {
+    ROOT: '',
+    getConfig: () => ({ enabled: false, intervalHours: 24, retention: 10, lastRunAt: '' }),
+    updateConfig: deny,
+    saveConfig: deny,
+    list: async () => [],
+    runNow: deny,
+    verify: deny,
+    restore: deny,
+    remove: deny,
+    archive: deny,
+    status: async () => ({
+      config: { enabled: false, intervalHours: 24, retention: 10, lastRunAt: '' },
+      snapshots: [],
+      disabledReason: reason,
+    }),
+    start() {}, stop() {}, tick() {},
+  };
+}
+
+module.exports = { createBackupManager, createDisabledBackup, clampConfig, NAME_RE };

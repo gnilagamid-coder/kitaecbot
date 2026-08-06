@@ -1329,11 +1329,14 @@ let registry = null;
 let platformDb = null;
 const tenantsBySub = new Map(); // subdomain -> tenant
 
-// Собирает арендатора из строки реестра. Токен бота расшифровывается;
-// не расшифровался (сменили SECRET_KEY) — магазин стартует без бота,
-// витрина и админка работают.
-function buildTenantFromRow(row) {
+// Собирает арендатора из строки реестра. Данные магазина живут в MySQL
+// (shop_docs через store-db), на диске — только картинки. Токен бота
+// расшифровывается; не расшифровался (сменили SECRET_KEY) — магазин стартует
+// без бота, витрина и админка работают.
+async function buildTenantFromRow(row) {
   const { decryptSecret } = require('./secrets');
+  const { createDbStore } = require('./store-db');
+  const { createDisabledBackup } = require('./backup');
   const dataDir = path.join(MULTI_ROOT, row.subdomain);
   fs.mkdirSync(path.join(dataDir, 'images'), { recursive: true });
 
@@ -1346,9 +1349,12 @@ function buildTenantFromRow(row) {
     }
   }
 
+  const store = await createDbStore({ db: platformDb, shopId: row.shop_id, dataDir });
+
   const t = createTenant({
     id: `shop-${row.shop_id}`,
     dataDir,
+    store,
     botToken,
     adminToken: '',
     adminHash: Buffer.from(String(row.admin_token_hash), 'hex'),
@@ -1361,12 +1367,8 @@ function buildTenantFromRow(row) {
   t.subdomain = row.subdomain;
   t.shopId = row.shop_id;
   t.status = row.status;
-  t.backup = createBackupManager({
-    dataDir,
-    backupsRoot: process.env.BACKUP_DIR,
-    tenantId: row.subdomain,
-    store: t.store,
-  });
+  // Данные в БД — снимки папки не применяются; интерфейс у заглушки тот же.
+  t.backup = createDisabledBackup('данные магазина в MySQL — снимки папки не применяются');
   return t;
 }
 
@@ -1420,7 +1422,7 @@ async function handlePlatform(req, res, url) {
     } catch (e) { return json(res, e.status || 400, { error: e.message }); }
 
     const row = await registry.findShopBySubdomain(p.subdomain);
-    const t = buildTenantFromRow(row);
+    const t = await buildTenantFromRow(row);
     tenantsBySub.set(p.subdomain, t);
     t.bot.start();
     t.backup.start();
@@ -1466,7 +1468,7 @@ async function bootPlatform() {
   for (const row of rows) {
     if (row.status !== 'active') continue;
     const full = await registry.findShopBySubdomain(row.subdomain);
-    tenantsBySub.set(row.subdomain, buildTenantFromRow(full));
+    tenantsBySub.set(row.subdomain, await buildTenantFromRow(full));
   }
 }
 

@@ -5,8 +5,9 @@
 //   1) MySQL — товары/заказы/картинки/настройки/просмотры укладываются в схему
 //      0001_core.sql: legacy_id связывает старые id с новыми, заказы и товары
 //      целиком дублируются в raw-колонки (переживают поля, которых схема не знает);
-//   2) рабочая папка магазина в MULTITENANT_DATA_ROOT — в Stage 3 витрина ещё
-//      живёт на файлах, поэтому магазин должен стартовать сразу после импорта.
+//   2) живые документы магазина — в shop_docs (Stage 4: витрина платформы читает
+//      данные из БД через store-db), картинки — в рабочую папку магазина.
+//      Магазин стартует сразу после импорта.
 //
 // Использование:
 //   node server/import-shop.js <папка данных> <поддомен>
@@ -36,6 +37,7 @@ async function importLegacy({ db, registry, dataDir, subdomain, dataRoot, secret
   const products = readJson(path.join(dataDir, 'products.json'), []);
   const orders = readJson(path.join(dataDir, 'orders.json'), []);
   const views = readJson(path.join(dataDir, 'views.json'), {});
+  const users = readJson(path.join(dataDir, 'users.json'), null);
 
   const shopName = (legacySettings.brand && legacySettings.brand.shopName)
     || path.basename(path.resolve(dataDir));
@@ -44,14 +46,7 @@ async function importLegacy({ db, registry, dataDir, subdomain, dataRoot, secret
   const p = await provisionShop({ registry, dataRoot, subdomain, shopName, email, botToken, secretKey });
   const shopId = p.shopId;
 
-  // ---- рабочая папка: переносим как есть, магазин стартует сразу ----
-  fs.writeFileSync(path.join(p.dataDir, 'settings.json'),
-    JSON.stringify(sanitize(legacySettings), null, 2), 'utf8');
-  fs.writeFileSync(path.join(p.dataDir, 'products.json'), JSON.stringify(products, null, 2), 'utf8');
-  fs.writeFileSync(path.join(p.dataDir, 'orders.json'), JSON.stringify(orders, null, 2), 'utf8');
-  if (Object.keys(views).length) {
-    fs.writeFileSync(path.join(p.dataDir, 'views.json'), JSON.stringify(views, null, 2), 'utf8');
-  }
+  // ---- рабочая папка: картинки остаются на диске, JSON уходит в shop_docs ----
   const imgSrc = path.join(dataDir, 'images');
   let imagesCopied = 0;
   if (fs.existsSync(imgSrc)) {
@@ -65,6 +60,18 @@ async function importLegacy({ db, registry, dataDir, subdomain, dataRoot, secret
   const legacyToNew = new Map(); // старый id товара -> новый id в БД
 
   await db.tx(async conn => {
+    // Живые документы магазина: витрина платформы читает их через store-db.
+    // UPSERT перетирает дефолтные settings, созданные provisionShop.
+    const upsertDoc = (doc, data) => conn.query(
+      'INSERT INTO shop_docs (shop_id, doc, data) VALUES (?, ?, ?) ' +
+      'AS new ON DUPLICATE KEY UPDATE data = new.data',
+      [shopId, doc, JSON.stringify(data)]);
+    await upsertDoc('settings', sanitize(legacySettings));
+    await upsertDoc('products', products);
+    await upsertDoc('orders', orders);
+    if (Object.keys(views).length) await upsertDoc('views', views);
+    if (users) await upsertDoc('users', users);
+
     await conn.query('INSERT INTO shop_settings (shop_id, settings) VALUES (?, ?)',
       [shopId, JSON.stringify(sanitize(legacySettings))]);
 

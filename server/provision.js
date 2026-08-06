@@ -57,13 +57,22 @@ async function provisionShop({
     status: 'active',
   });
 
-  // Папка данных: store сам создаст JSON-файлы при первой записи, но images/
-  // нужен сразу — витрина и админка кладут туда картинки.
+  // Папка данных: images/ нужен сразу — витрина и админка кладут туда картинки.
+  // JSON-документы в режиме платформы живут в MySQL (shop_docs), файл
+  // settings.json пишем только если реестр пришёл без БД (тесты/совместимость).
   const dataDir = path.join(dataRoot, sub);
   fs.mkdirSync(path.join(dataDir, 'images'), { recursive: true });
   // Дефолты целиком из settings.js (сейчас — Liquid Glass), сверху имя.
   const settings = sanitize(mergeDeep(DEFAULTS, { brand: { shopName: name } }));
-  fs.writeFileSync(path.join(dataDir, 'settings.json'), JSON.stringify(settings, null, 2), 'utf8');
+  if (registry.db) {
+    await registry.db.query(
+      'INSERT INTO shop_docs (shop_id, doc, data) VALUES (?, ?, ?) ' +
+      'AS new ON DUPLICATE KEY UPDATE data = new.data',
+      [shopId, 'settings', JSON.stringify(settings)]
+    );
+  } else {
+    fs.writeFileSync(path.join(dataDir, 'settings.json'), JSON.stringify(settings, null, 2), 'utf8');
+  }
 
   return { tenantId, shopId, subdomain: sub, shopName: name, adminToken, dataDir };
 }

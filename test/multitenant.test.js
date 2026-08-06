@@ -1,6 +1,8 @@
-// Stage 3 — мультитенантность: секреты, реестр, provisioning, импортёр,
-// роутинг по поддоменам и регистрация. Юнит-часть работает без MySQL;
-// интеграционная пропускается, если БД не настроена (как в migrations.test.js).
+// Мультитенантность: секреты, реестр, provisioning, импортёр, роутинг
+// по поддоменам, регистрация и слой данных на MySQL (Stage 4): магазины
+// переживают рестарт платформы, потому что их документы — в shop_docs.
+// Юнит-часть работает без MySQL; интеграционная пропускается, если БД не
+// настроена (как в migrations.test.js).
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -32,6 +34,38 @@ let db, root, registry, child;
 let available = false;   // MySQL поднялся
 let platformUp = false;  // сервер платформы поднялся
 
+// Запуск платформы отдельным процессом. Используется и в before, и в тесте
+// на рестарт — там процесс убивается и поднимается заново поверх той же БД.
+function spawnPlatform() {
+  const c = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
+    env: {
+      ...process.env,
+      PORT: String(PORT), HOST: '127.0.0.1',
+      MULTITENANT: '1',
+      MULTITENANT_DOMAIN: DOMAIN,
+      MULTITENANT_DATA_ROOT: DATA_ROOT,
+      MYSQL_DATABASE: TEST_DB,
+      SECRET_KEY: SECRET,
+      ADMIN_TOKEN: '', BOT_TOKEN: '',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  c.stderr.on('data', d => { if (process.env.MT_DEBUG) console.error('[child stderr]', String(d)); });
+  return c;
+}
+
+// Готовность — строка запуска платформы в stdout (реестр к этому моменту поднят)
+function waitReady(c) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('платформа не поднялась за 15 секунд')), 15000);
+    c.stdout.on('data', d => {
+      if (process.env.MT_DEBUG) console.error('[child stdout]', String(d));
+      if (String(d).includes('[platform]')) { clearTimeout(timer); resolve(); }
+    });
+    c.on('exit', code => reject(new Error(`сервер умер при старте (код ${code})`)));
+  });
+}
+
 // Один before на всё: сначала БД, потом платформа поверх неё. Хуки в node:test
 // держим в начале файла — регистрация после тестов работает нестабильно.
 test.before(async () => {
@@ -48,30 +82,9 @@ test.before(async () => {
     return;
   }
 
-  child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
-    env: {
-      ...process.env,
-      PORT: String(PORT), HOST: '127.0.0.1',
-      MULTITENANT: '1',
-      MULTITENANT_DOMAIN: DOMAIN,
-      MULTITENANT_DATA_ROOT: DATA_ROOT,
-      MYSQL_DATABASE: TEST_DB,
-      SECRET_KEY: SECRET,
-      ADMIN_TOKEN: '', BOT_TOKEN: '',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  child.stderr.on('data', d => { if (process.env.MT_DEBUG) console.error('[child stderr]', String(d)); });
+  child = spawnPlatform();
   try {
-    // Готовность — строка запуска платформы в stdout (реестр к этому моменту поднят)
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('платформа не поднялась за 15 секунд')), 15000);
-      child.stdout.on('data', d => {
-        if (process.env.MT_DEBUG) console.error('[child stdout]', String(d));
-        if (String(d).includes('[platform]')) { clearTimeout(timer); resolve(); }
-      });
-      child.on('exit', code => reject(new Error(`сервер умер при старте (код ${code})`)));
-    });
+    await waitReady(child);
     platformUp = true;
   } catch (e) {
     console.error('[multitenant test]', e.message);
@@ -149,9 +162,12 @@ test('provisionShop: строки реестра, папка данных, ду�
     crypto.createHash('sha256').update(p.adminToken).digest('hex'),
     'в БД лежит sha256 пароля, а не он сам');
 
-  const settings = JSON.parse(fs.readFileSync(path.join(p.dataDir, 'settings.json'), 'utf8'));
-  assert.strictEqual(settings.brand.shopName, 'Тестовый магазин');
-  assert.strictEqual(settings.theme.preset, 'glass', 'новый магазин — Liquid Glass по умолчанию');
+  // Дефолтные настройки — в shop_docs (данные платформы живут в MySQL)
+  const [[doc]] = await db.query(
+    'SELECT data FROM shop_docs WHERE shop_id = ? AND doc = ?', [p.shopId, 'settings']);
+  assert.strictEqual(doc.data.brand.shopName, 'Тестовый магазин');
+  assert.strictEqual(doc.data.theme.preset, 'glass', 'новый магазин — Liquid Glass по умолчанию');
+  assert.ok(fs.existsSync(path.join(p.dataDir, 'images')), 'папка картинок создана');
 
   await assert.rejects(
     () => provisionShop({ registry, dataRoot: DATA_ROOT, subdomain: 'demo', secretKey: SECRET }),
@@ -245,11 +261,16 @@ test('importLegacy: товары, заказы, картинки и просмо
   assert.strictEqual(st.settings.brand.shopName, 'Легаси');
   assert.strictEqual(st.settings.theme.preset, 'brutalist', 'выбранный пресет магазина не заменяется дефолтом');
 
-  // Рабочая папка: магазин может стартовать сразу
-  for (const f of ['settings.json', 'products.json', 'orders.json', 'views.json']) {
-    assert.ok(fs.existsSync(path.join(r.dataDir, f)), `в рабочей папке нет ${f}`);
-  }
+  // Живые документы магазина — в shop_docs, на диске только картинки
+  const [docs] = await db.query('SELECT doc, data FROM shop_docs WHERE shop_id = ?', [r.shopId]);
+  const byDoc = Object.fromEntries(docs.map(d => [d.doc, d.data]));
+  assert.strictEqual(byDoc.settings.brand.shopName, 'Легаси');
+  assert.strictEqual(byDoc.settings.theme.preset, 'brutalist', 'выбранный пресет магазина не заменяется дефолтом');
+  assert.deepStrictEqual(byDoc.products.map(x => x.id), [111, 222]);
+  assert.strictEqual(byDoc.orders[0].note, 'поле, которого схема не знает');
+  assert.deepStrictEqual(byDoc.views, { 111: 7, 222: 3 });
   assert.ok(fs.existsSync(path.join(r.dataDir, 'images', 'img_a.png')));
+  assert.ok(!fs.existsSync(path.join(r.dataDir, 'products.json')), 'JSON уехал из папки в БД');
   fs.rmSync(legacy, { recursive: true, force: true });
 });
 
@@ -348,4 +369,34 @@ test('неизвестный поддомен и занятый поддомен
   });
   assert.strictEqual(dup.status, 409);
   assert.ok(/занят/.test(dup.json.error));
+});
+
+test('рестарт платформы: данные магазинов переживают остановку', async t => {
+  if (skipHttp(t)) return;
+
+  // Магазин с изменением, сделанным через админку прямо перед остановкой.
+  const reg = await httpReq({
+    method: 'POST', p: '/api/platform/register', host: DOMAIN,
+    body: { shopName: 'Долгожитель', subdomain: 'doom' },
+  });
+  assert.strictEqual(reg.status, 200, reg.text);
+  const put = await httpReq({
+    method: 'PUT', p: '/api/admin/settings', host: 'doom.' + DOMAIN,
+    body: { brand: { shopName: 'Пережил рестарт' } },
+    headers: { 'x-admin-token': reg.json.adminToken },
+  });
+  assert.strictEqual(put.status, 200, put.text);
+  // Запись в MySQL идёт асинхронной очередью — даём ей дописать до kill.
+  await new Promise(r => setTimeout(r, 500));
+
+  await new Promise(resolve => { child.on('exit', resolve); child.kill(); });
+  child = spawnPlatform();
+  await waitReady(child);
+
+  const doom = await httpReq({ host: 'doom.' + DOMAIN, p: '/api/settings' });
+  assert.strictEqual(doom.status, 200);
+  assert.strictEqual(doom.json.brand.shopName, 'Пережил рестарт',
+    'изменение из админки пережило рестарт — данные в MySQL');
+  const rom = await httpReq({ host: 'romashka.' + DOMAIN, p: '/api/settings' });
+  assert.strictEqual(rom.json.brand.shopName, 'Ромашка', 'старые магазины поднялись из реестра');
 });
