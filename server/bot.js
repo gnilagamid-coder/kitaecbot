@@ -1,36 +1,33 @@
 'use strict';
-// Бот на long polling. Сознательно не webhook: вебхуку нужен публичный HTTPS
-// с валидным сертификатом ДО первого запуска, а long polling работает сразу
-// после `systemctl start` — даже пока домен ещё не приехал. Один процесс с
-// веб-сервером, отдельный демон поднимать не нужно.
+// Бот на long polling. Сознательно не webhook по умолчанию: вебхуку нужен
+// публичный HTTPS с валидным сертификатом ДО первого запуска, а long polling
+// работает сразу после `systemctl start` — даже пока домен ещё не приехал.
+// Один процесс с веб-сервером, отдельный демон поднимать не нужно.
+//
+// Фабрика, а не синглтон: курсор опроса и флаг работы раньше жили на уровне
+// модуля, то есть на процесс приходился ровно один бот. Теперь у каждого
+// магазина свой экземпляр со своим состоянием — это и есть подготовка к тому,
+// чтобы один процесс вёл много магазинов сразу.
 
 const crypto = require('node:crypto');
-const store = require('./store');
-const { tgApi, esc, BOT_TOKEN } = require('./telegram');
+const { esc } = require('./telegram');
 
-let offset = 0;
-let running = false;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-function settings() { return require('./settings').sanitize(store.read('settings', {})); }
+// ---------- чистые помощники (состояние не нужно) ----------
 
 function fill(tpl, vars) {
   return String(tpl || '').replace(/\{(\w+)\}/g, (m, k) => (vars[k] !== undefined ? vars[k] : m));
 }
 
-// URL для открытия мини-аппа кнопками web_app и menu button.
-// Приоритет: ссылка вида t.me/bot/app (это уже готовая ссылка Mini App,
-// Telegram открывает её нативно), затем https-адрес PUBLIC_URL из .env.
-// Важно по Bot API: web_app принимает только https, а для «чужих» доменов
-// домен должен быть привязан к боту в @BotFather (/setdomain), иначе клиент
-// откатится на открытие в браузере. t.me-ссылка от этого не страдает.
-function shopWebAppUrl(s) {
-  const link = String(s.channel.miniAppLink || '').trim();
-  // Прямая ссылка мини-аппа — это https://t.me/<бот>/<appname>; голая ссылка
-  // на бота мини-аппом не является и в web_app не принимается.
-  if (/^https:\/\/(t\.me|telegram\.me)\/[A-Za-z0-9_]+\/[A-Za-z0-9_]+/i.test(link)) return link;
-  const pub = String(process.env.PUBLIC_URL || '').trim().replace(/\/$/, '');
-  if (/^https:\/\//i.test(pub)) return pub;
-  return '';
+// принимает и "@username", и "username", и уже готовую полную ссылку
+function normalize(v) {
+  const t = String(v || '').trim();
+  if (!t) return '';
+  if (/^https?:\/\//i.test(t)) return t;
+  if (t.startsWith('@')) return 'https://t.me/' + t.slice(1);
+  if (/^[a-zA-Z0-9_]{5,}$/.test(t)) return 'https://t.me/' + t;
+  return t;
 }
 
 // Текст кнопки меню (MenuButtonWebApp.text — обязательное и непустое поле).
@@ -48,299 +45,8 @@ function menuButtonText(s) {
   return cleaned || 'Магазин';
 }
 
-function menuKeyboard(s, chatId, subscribed) {
-  const link = s.channel.miniAppLink;
-  const rows = [];
-  // web_app открывает НАСТОЯЩИЙ мини-апп (обвязка Telegram, initData),
-  // но по Bot API работает только в приватных чатах. В группы и без
-  // проверенного https-URL кладём обычную url-ссылку.
-  const appUrl = shopWebAppUrl(s);
-  if (appUrl && Number(chatId) > 0) rows.push([{ text: s.bot.buttonText, web_app: { url: appUrl } }]);
-  else if (link) rows.push([{ text: s.bot.buttonText, url: link }]);
-  if (s.manager.supportUrl || s.manager.buyUrl) {
-    const raw = s.manager.supportUrl || s.manager.buyUrl;
-    rows.push([{ text: '💬 Написать менеджеру', url: normalize(raw) }]);
-  }
-  // Переключатель подписки на анонсы. Подписка строго опциональна, поэтому
-  // кнопка показывается только когда явно передали состояние (приветствие
-  // /start, ответы /subscribe//unsubscribe, нажатие кнопки) — в остальных
-  // местах она не мельтешит.
-  if (subscribed !== undefined && s.announce && s.announce.enabled) {
-    rows.push([subscribed
-      ? { text: '🔕 Отписаться от анонсов', callback_data: 'sub:off' }
-      : { text: '🔔 Подписаться на анонсы', callback_data: 'sub:on' }]);
-  }
-  return rows.length ? { inline_keyboard: rows } : undefined;
-}
-
-function normalize(v) {
-  const t = String(v || '').trim();
-  if (!t) return '';
-  if (/^https?:\/\//i.test(t)) return t;
-  if (t.startsWith('@')) return 'https://t.me/' + t.slice(1);
-  if (/^[a-zA-Z0-9_]{5,}$/.test(t)) return 'https://t.me/' + t;
-  return t;
-}
-
-// Отправка с аварийным отстёгиванием клавиатуры. Самая частая причина 400 на
-// sendMessage с web_app-кнопкой — домен не привязан к боту в @BotFather
-// (/setdomain): Telegram отклоняет ВЕСЬ message целиком, и получатель не
-// видит ничего. Текст важнее кнопки: при отказе шлём сообщение без неё.
-async function sendWithFallback(payload, label) {
-  const res = await tgApi('sendMessage', payload);
-  if (res.ok) return res;
-  console.error(`[bot] ${label} не отправлено: ${res.description}`);
-  if (!payload.reply_markup) return res;
-  const retry = await tgApi('sendMessage', { ...payload, reply_markup: undefined });
-  if (retry.ok) {
-    console.warn(`[bot] ${label} доставлено без кнопки магазина — привяжите домен в @BotFather (/setdomain) или впишите прямую ссылку мини-аппа t.me/бот/app в настройках`);
-    return retry;
-  }
-  console.error(`[bot] ${label} без кнопки тоже не ушло: ${retry.description}`);
-  return retry;
-}
-
-async function handleUpdate(update) {
-  if (update.callback_query) return handleCallback(update.callback_query);
-  const msg = update.message || update.edited_message;
-  if (!msg || !msg.chat) return;
-
-  const s = settings();
-  if (!s.bot.enabled) return;
-
-  const chatId = msg.chat.id;
-  const name = esc(msg.from && msg.from.first_name || 'друг');
-  const text = String(msg.text || '').trim();
-
-  // новый пользователь — опционально дёргаем менеджера
-  const users = store.read('users', {});
-  if (!users[chatId]) {
-    users[chatId] = { id: chatId, username: msg.from && msg.from.username || '', name, firstSeen: Date.now() };
-    store.write('users', users);
-    if (s.notify.enabled && s.notify.onNewUser) {
-      const who = msg.from && msg.from.username ? `@${esc(msg.from.username)}` : `<code>${chatId}</code>`;
-      await notifyManagers(s, `👤 Новый пользователь бота: ${name} ${who}`);
-    }
-  }
-
-  if (text === '/start' || text.startsWith('/start ')) {
-    // подписка на анонсы строго опциональна: в приветствии показываем кнопку
-    // «🔔 Подписаться», но без явного действия никто не подписывается
-    const sub = s.announce.enabled
-      ? Boolean(users[chatId] && users[chatId].subAnnounce === true)
-      : undefined;
-    await sendWithFallback({
-      chat_id: chatId,
-      text: fill(s.bot.welcomeText, { name, shop: esc(s.brand.shopName) }),
-      parse_mode: 'HTML',
-      reply_markup: menuKeyboard(s, chatId, sub),
-    }, 'приветствие');
-    return;
-  }
-
-  if (text === '/help' || text === '/support') {
-    await sendWithFallback({
-      chat_id: chatId,
-      text: fill(s.bot.helpText, { name, shop: esc(s.brand.shopName) }),
-      parse_mode: 'HTML',
-      reply_markup: menuKeyboard(s, chatId),
-    }, 'ответ на /help');
-    return;
-  }
-
-  if (text === '/shop' || text === '/menu' || text === '/catalog') {
-    await sendWithFallback({
-      chat_id: chatId,
-      text: `🛍 ${esc(s.brand.shopName)}`,
-      parse_mode: 'HTML',
-      reply_markup: menuKeyboard(s, chatId),
-    }, 'каталог');
-    return;
-  }
-
-  if (text === '/id') {
-    await tgApi('sendMessage', { chat_id: chatId, text: `Ваш chat_id: <code>${chatId}</code>`, parse_mode: 'HTML' });
-    return;
-  }
-
-  // Подписка на анонсы — только явное действие: кнопка «🔔 Подписаться»
-  // в приветствии или команда /subscribe. По умолчанию НЕ подписан никто.
-  if (text === '/unsubscribe') {
-    users[chatId] = { ...(users[chatId] || { id: chatId }), name, subAnnounce: false };
-    store.write('users', users);
-    await sendWithFallback({
-      chat_id: chatId,
-      text: `Готово, ${name} — анонсы приходить не будут. Передумаете — отправьте /subscribe`,
-      parse_mode: 'HTML',
-      reply_markup: menuKeyboard(s, chatId, false),
-    }, 'ответ на /unsubscribe');
-    return;
-  }
-
-  if (text === '/subscribe') {
-    users[chatId] = { ...(users[chatId] || { id: chatId }), name, subAnnounce: true };
-    store.write('users', users);
-    await sendWithFallback({
-      chat_id: chatId,
-      text: `Отлично, ${name}! Теперь вы будете первыми узнавать о новинках и смене цен.`,
-      parse_mode: 'HTML',
-      reply_markup: menuKeyboard(s, chatId, true),
-    }, 'ответ на /subscribe');
-    return;
-  }
-
-  // всё остальное — пересылаем менеджеру как вопрос от клиента
-  if (text && s.notify.enabled && s.notify.onInquiry) {
-    const who = msg.from && msg.from.username ? `@${esc(msg.from.username)}` : `<code>${chatId}</code>`;
-    await notifyManagers(s, `💬 Сообщение боту от ${name} ${who}:\n\n${esc(text)}`);
-  }
-}
-
-// Нажатие кнопок подписки на анонсы. Сюда попадаем только с явным действием,
-// так что рассылка остаётся строго опциональной: получает её лишь тот,
-// у кого subAnnounce === true.
-async function handleCallback(cb) {
-  const data = String(cb.data || '');
-  if (data !== 'sub:on' && data !== 'sub:off') return;
-  const chatId = cb.message && cb.message.chat && cb.message.chat.id;
-  if (!chatId) return;
-  const on = data === 'sub:on';
-  const users = store.read('users', {});
-  users[chatId] = {
-    ...(users[chatId] || { id: chatId }),
-    name: esc(cb.from && cb.from.first_name || 'друг'),
-    subAnnounce: on,
-  };
-  store.write('users', users);
-  await tgApi('answerCallbackQuery', {
-    callback_query_id: cb.id,
-    text: on ? 'Подписались на анонсы 🔔' : 'Отписались от анонсов',
-  });
-  // переключаем кнопку на противоположную — состояние видно прямо в чате
-  await tgApi('editMessageReplyMarkup', {
-    chat_id: chatId,
-    message_id: cb.message.message_id,
-    reply_markup: menuKeyboard(settings(), chatId, on),
-  });
-}
-
-async function notifyManagers(s, text) {
-  const appUrl = shopWebAppUrl(s);
-  let failed = 0;
-  for (const id of s.notify.chatIds) {
-    const payload = {
-      chat_id: id, text, parse_mode: 'HTML',
-      disable_web_page_preview: true,
-      disable_notification: s.notify.silent,
-    };
-    // та же кнопка «Открыть», что у покупателя: web_app — только в личке,
-    // в группы (отрицательный chat_id) не пришиваем
-    if (appUrl && Number(id) > 0) {
-      payload.reply_markup = { inline_keyboard: [[{ text: s.bot.buttonText, web_app: { url: appUrl } }]] };
-    }
-    const res = await sendWithFallback(payload, `уведомление менеджеру ${id}`);
-    if (!res.ok) failed++;
-  }
-  return failed === 0;
-}
-
-// Анонс только явно подписавшимся: subAnnounce === true ставится кнопкой
-// «🔔 Подписаться на анонсы» в приветствии или командой /subscribe.
-// По умолчанию не подписан никто. Группы и каналы (отрицательный chat_id)
-// не трогаем, потолок одной рассылки — 200 адресатов с паузой 35 мс,
-// чтобы не влететь в глобальный лимит Telegram.
-async function sendToSubscribers(text, label, s0) {
-  const s = s0 || settings();
-  const users = store.read('users', {});
-  const ids = Object.keys(users)
-    .filter(id => Number(id) > 0 && users[id] && users[id].subAnnounce === true)
-    .slice(0, 200);
-  if (!ids.length) {
-    console.log(`[bot] ${label}: подписчиков нет — пропускаю`);
-    return { sent: 0, total: 0 };
-  }
-  // кнопка мини-аппа, как у покупателей; если домен не привязан —
-  // sendWithFallback сам переотправит сообщение без неё
-  const appUrl = shopWebAppUrl(s);
-  const kb = appUrl
-    ? { inline_keyboard: [[{ text: s.bot.buttonText, web_app: { url: appUrl } }]] }
-    : undefined;
-  let sent = 0;
-  for (const id of ids) {
-    const res = await sendWithFallback({
-      chat_id: Number(id), text,
-      parse_mode: 'HTML', disable_web_page_preview: true,
-      reply_markup: kb,
-    }, `${label} подписчику ${id}`);
-    if (res.ok) sent++;
-    await sleep(35);
-  }
-  console.log(`[bot] ${label}: доставлено ${sent}/${ids.length} подписчикам`);
-  return { sent, total: ids.length };
-}
-
 const POLL_TIMEOUT = 25;                 // сколько Telegram держит соединение
 const POLL_ABORT_MS = POLL_TIMEOUT * 1000 + 8000; // запас на дорогу
-
-async function poll() {
-  let failures = 0;
-  while (running) {
-    try {
-      // retries:0 здесь принципиально. Раньше шли ретраи по умолчанию, и при
-      // оборванном соединении один цикл опроса занимал до 3 × 35 с + паузы —
-      // около двух минут, в течение которых бот не отвечал вообще. Именно это
-      // выглядело как «после простоя бот долго просыпается»: NAT провайдера
-      // тихо выбрасывает простаивающий коннект, а мы этого не замечали.
-      // Цикл сам себе ретрай, дублировать его внутри tgApi не нужно.
-      const res = await tgApi(
-        'getUpdates',
-        { offset, timeout: POLL_TIMEOUT, allowed_updates: ['message', 'callback_query'] },
-        { retries: 0, timeoutMs: POLL_ABORT_MS }
-      );
-
-      if (res && res.ok) {
-        failures = 0;
-        for (const u of res.result) {
-          offset = u.update_id + 1;
-          try { await handleUpdate(u); } catch (e) { console.error('[bot] update failed:', e.message); }
-        }
-        continue; // сразу за следующей порцией, без пауз
-      }
-
-      if (res && /conflict/i.test(res.description || '')) {
-        // где-то ещё запущен второй экземпляр или висит вебхук
-        console.error('[bot]', res.description, '— снимаю вебхук и продолжаю');
-        await tgApi('deleteWebhook', {});
-        await sleep(5000);
-        continue;
-      }
-
-      // Сетевой сбой: первый раз переподключаемся мгновенно — обычно это как раз
-      // протухший коннект, и повтор проходит сразу. Дальше нарастающая пауза,
-      // чтобы не долбить недоступный сервер, но не больше 30 с.
-      failures++;
-      if (res && !res.ok) console.error('[bot] getUpdates:', res.description);
-      const wait = failures === 1 ? 0 : Math.min(30000, 2000 * failures);
-      if (wait) await sleep(wait);
-    } catch (e) {
-      failures++;
-      console.error('[bot] poll error:', e.message);
-      await sleep(Math.min(30000, 2000 * failures));
-    }
-  }
-}
-
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-// Секрет вебхука выводим детерминированно из токенов, чтобы не заводить ещё одну
-// переменную окружения: Telegram шлёт его в заголовке X-Telegram-Bot-Api-Secret-Token,
-// и без этой проверки любой желающий мог бы слать боту поддельные апдейты POST-запросом.
-function webhookSecret() {
-  return crypto.createHash('sha256')
-    .update(BOT_TOKEN + '|' + (process.env.ADMIN_TOKEN || ''))
-    .digest('hex')
-    .slice(0, 48);
-}
 
 const COMMANDS = [
   { command: 'start', description: 'Открыть магазин' },
@@ -351,73 +57,388 @@ const COMMANDS = [
   { command: 'id', description: 'Показать мой chat_id' },
 ];
 
-async function start() {
-  if (!BOT_TOKEN) {
-    console.warn('[bot] BOT_TOKEN не задан — бот выключен, витрина работает без него');
-    return;
-  }
-  const me = await tgApi('getMe', {});
-  if (!me.ok) {
-    console.error('[bot] не удалось авторизоваться:', me.description);
-    return;
-  }
-  await tgApi('setMyCommands', { commands: COMMANDS });
+// ---------- экземпляр бота одного магазина ----------
+// t — арендатор: { id, store, telegram, settings(), publicUrl, adminToken, botMode }
+function createBot(t) {
+  const { tgApi, BOT_TOKEN } = t.telegram;
+  const store = t.store;
+  const settings = () => t.settings();
+  // Префикс в логах: когда процесс ведёт несколько магазинов, без него
+  // непонятно, чей бот ругается.
+  const tag = t.id ? `[bot:${t.id}]` : '[bot]';
 
-  // Кнопка меню слева от поля ввода — её же видно в превью чата. Без этого
-  // вызова у бота стоит type=default («Open»/список команд), а если продавец
-  // когда-то вписал туда обычный url через BotFather — магазин открывается
-  // браузерным окном без обвязки Mini App. Ставим web_app программно,
-  // без chat_id = дефолт для всех приватных чатов. Текст ограничен 20 символами.
-  {
-    const s0 = settings();
-    const appUrl = shopWebAppUrl(s0);
-    if (appUrl) {
-      const mb = await tgApi('setChatMenuButton', {
-        menu_button: {
-          type: 'web_app',
-          text: menuButtonText(s0),
-          web_app: { url: appUrl },
-        },
-      });
-      if (mb.ok) console.log(`[bot] кнопка меню → web_app: ${appUrl}`);
-      // Подсказка по тексту ошибки: /setdomain помогает только при проблемах
-      // с URL, а «text must be non-empty» — это валидация самого текста.
-      else if (/url|domain/i.test(mb.description || '')) console.warn('[bot] setChatMenuButton не удался:', mb.description,
-        '— проверьте домен в @BotFather (/setdomain) или используйте t.me-ссылку мини-аппа');
-      else console.warn('[bot] setChatMenuButton не удался:', mb.description);
+  let offset = 0;
+  let running = false;
+
+  // URL для открытия мини-аппа кнопками web_app и menu button.
+  // Приоритет: ссылка вида t.me/bot/app (это уже готовая ссылка Mini App,
+  // Telegram открывает её нативно), затем https-адрес магазина.
+  // Важно по Bot API: web_app принимает только https, а для «чужих» доменов
+  // домен должен быть привязан к боту в @BotFather (/setdomain), иначе клиент
+  // откатится на открытие в браузере. t.me-ссылка от этого не страдает.
+  function shopWebAppUrl(s) {
+    const link = String(s.channel.miniAppLink || '').trim();
+    // Прямая ссылка мини-аппа — это https://t.me/<бот>/<appname>; голая ссылка
+    // на бота мини-аппом не является и в web_app не принимается.
+    if (/^https:\/\/(t\.me|telegram\.me)\/[A-Za-z0-9_]+\/[A-Za-z0-9_]+/i.test(link)) return link;
+    const pub = String(t.publicUrl || '').trim().replace(/\/$/, '');
+    if (/^https:\/\//i.test(pub)) return pub;
+    return '';
+  }
+
+  function menuKeyboard(s, chatId, subscribed) {
+    const link = s.channel.miniAppLink;
+    const rows = [];
+    // web_app открывает НАСТОЯЩИЙ мини-апп (обвязка Telegram, initData),
+    // но по Bot API работает только в приватных чатах. В группы и без
+    // проверенного https-URL кладём обычную url-ссылку.
+    const appUrl = shopWebAppUrl(s);
+    if (appUrl && Number(chatId) > 0) rows.push([{ text: s.bot.buttonText, web_app: { url: appUrl } }]);
+    else if (link) rows.push([{ text: s.bot.buttonText, url: link }]);
+    if (s.manager.supportUrl || s.manager.buyUrl) {
+      const raw = s.manager.supportUrl || s.manager.buyUrl;
+      rows.push([{ text: '💬 Написать менеджеру', url: normalize(raw) }]);
     }
+    // Переключатель подписки на анонсы. Подписка строго опциональна, поэтому
+    // кнопка показывается только когда явно передали состояние (приветствие
+    // /start, ответы /subscribe//unsubscribe, нажатие кнопки) — в остальных
+    // местах она не мельтешит.
+    if (subscribed !== undefined && s.announce && s.announce.enabled) {
+      rows.push([subscribed
+        ? { text: '🔕 Отписаться от анонсов', callback_data: 'sub:off' }
+        : { text: '🔔 Подписаться на анонсы', callback_data: 'sub:on' }]);
+    }
+    return rows.length ? { inline_keyboard: rows } : undefined;
   }
 
-  const publicUrl = (process.env.PUBLIC_URL || '').replace(/\/$/, '');
-  const wantWebhook = String(process.env.BOT_MODE || '').toLowerCase() === 'webhook';
+  // Отправка с аварийным отстёгиванием клавиатуры. Самая частая причина 400 на
+  // sendMessage с web_app-кнопкой — домен не привязан к боту в @BotFather
+  // (/setdomain): Telegram отклоняет ВЕСЬ message целиком, и получатель не
+  // видит ничего. Текст важнее кнопки: при отказе шлём сообщение без неё.
+  async function sendWithFallback(payload, label) {
+    const res = await tgApi('sendMessage', payload);
+    if (res.ok) return res;
+    console.error(`${tag} ${label} не отправлено: ${res.description}`);
+    if (!payload.reply_markup) return res;
+    const retry = await tgApi('sendMessage', { ...payload, reply_markup: undefined });
+    if (retry.ok) {
+      console.warn(`${tag} ${label} доставлено без кнопки магазина — привяжите домен в @BotFather (/setdomain) или впишите прямую ссылку мини-аппа t.me/бот/app в настройках`);
+      return retry;
+    }
+    console.error(`${tag} ${label} без кнопки тоже не ушло: ${retry.description}`);
+    return retry;
+  }
 
-  if (wantWebhook) {
-    // Telegram принимает вебхук только на портах 443, 80, 88 и 8443 и только по HTTPS
-    if (!/^https:\/\//i.test(publicUrl)) {
-      console.error('[bot] BOT_MODE=webhook, но PUBLIC_URL не https — откатываюсь на long polling');
-    } else {
-      const url = `${publicUrl}/api/webhook`;
-      const res = await tgApi('setWebhook', {
-        url,
-        secret_token: webhookSecret(),
-        allowed_updates: ['message', 'callback_query'],
-        max_connections: 40,
-      });
-      if (res.ok) {
-        console.log(`[bot] запущен как @${me.result.username}, режим: webhook → ${url}`);
-        return; // апдейты придёт приносить HTTP-сервер, опрос не нужен
+  async function handleUpdate(update) {
+    if (update.callback_query) return handleCallback(update.callback_query);
+    const msg = update.message || update.edited_message;
+    if (!msg || !msg.chat) return;
+
+    const s = settings();
+    if (!s.bot.enabled) return;
+
+    const chatId = msg.chat.id;
+    const name = esc(msg.from && msg.from.first_name || 'друг');
+    const text = String(msg.text || '').trim();
+
+    // новый пользователь — опционально дёргаем менеджера
+    const users = store.read('users', {});
+    if (!users[chatId]) {
+      users[chatId] = { id: chatId, username: msg.from && msg.from.username || '', name, firstSeen: Date.now() };
+      store.write('users', users);
+      if (s.notify.enabled && s.notify.onNewUser) {
+        const who = msg.from && msg.from.username ? `@${esc(msg.from.username)}` : `<code>${chatId}</code>`;
+        await notifyManagers(s, `👤 Новый пользователь бота: ${name} ${who}`);
       }
-      console.error('[bot] setWebhook не удался:', res.description, '— откатываюсь на long polling');
+    }
+
+    if (text === '/start' || text.startsWith('/start ')) {
+      // подписка на анонсы строго опциональна: в приветствии показываем кнопку
+      // «🔔 Подписаться», но без явного действия никто не подписывается
+      const sub = s.announce.enabled
+        ? Boolean(users[chatId] && users[chatId].subAnnounce === true)
+        : undefined;
+      await sendWithFallback({
+        chat_id: chatId,
+        text: fill(s.bot.welcomeText, { name, shop: esc(s.brand.shopName) }),
+        parse_mode: 'HTML',
+        reply_markup: menuKeyboard(s, chatId, sub),
+      }, 'приветствие');
+      return;
+    }
+
+    if (text === '/help' || text === '/support') {
+      await sendWithFallback({
+        chat_id: chatId,
+        text: fill(s.bot.helpText, { name, shop: esc(s.brand.shopName) }),
+        parse_mode: 'HTML',
+        reply_markup: menuKeyboard(s, chatId),
+      }, 'ответ на /help');
+      return;
+    }
+
+    if (text === '/shop' || text === '/menu' || text === '/catalog') {
+      await sendWithFallback({
+        chat_id: chatId,
+        text: `🛍 ${esc(s.brand.shopName)}`,
+        parse_mode: 'HTML',
+        reply_markup: menuKeyboard(s, chatId),
+      }, 'каталог');
+      return;
+    }
+
+    if (text === '/id') {
+      await tgApi('sendMessage', { chat_id: chatId, text: `Ваш chat_id: <code>${chatId}</code>`, parse_mode: 'HTML' });
+      return;
+    }
+
+    // Подписка на анонсы — только явное действие: кнопка «🔔 Подписаться»
+    // в приветствии или команда /subscribe. По умолчанию НЕ подписан никто.
+    if (text === '/unsubscribe') {
+      users[chatId] = { ...(users[chatId] || { id: chatId }), name, subAnnounce: false };
+      store.write('users', users);
+      await sendWithFallback({
+        chat_id: chatId,
+        text: `Готово, ${name} — анонсы приходить не будут. Передумаете — отправьте /subscribe`,
+        parse_mode: 'HTML',
+        reply_markup: menuKeyboard(s, chatId, false),
+      }, 'ответ на /unsubscribe');
+      return;
+    }
+
+    if (text === '/subscribe') {
+      users[chatId] = { ...(users[chatId] || { id: chatId }), name, subAnnounce: true };
+      store.write('users', users);
+      await sendWithFallback({
+        chat_id: chatId,
+        text: `Отлично, ${name}! Теперь вы будете первыми узнавать о новинках и смене цен.`,
+        parse_mode: 'HTML',
+        reply_markup: menuKeyboard(s, chatId, true),
+      }, 'ответ на /subscribe');
+      return;
+    }
+
+    // всё остальное — пересылаем менеджеру как вопрос от клиента
+    if (text && s.notify.enabled && s.notify.onInquiry) {
+      const who = msg.from && msg.from.username ? `@${esc(msg.from.username)}` : `<code>${chatId}</code>`;
+      await notifyManagers(s, `💬 Сообщение боту от ${name} ${who}:\n\n${esc(text)}`);
     }
   }
 
-  console.log(`[bot] запущен как @${me.result.username}, режим: long polling`);
-  // long polling и вебхук взаимоисключающи — снимаем вебхук, иначе getUpdates не работает
-  await tgApi('deleteWebhook', { drop_pending_updates: false });
-  running = true;
-  poll();
+  // Нажатие кнопок подписки на анонсы. Сюда попадаем только с явным действием,
+  // так что рассылка остаётся строго опциональной: получает её лишь тот,
+  // у кого subAnnounce === true.
+  async function handleCallback(cb) {
+    const data = String(cb.data || '');
+    if (data !== 'sub:on' && data !== 'sub:off') return;
+    const chatId = cb.message && cb.message.chat && cb.message.chat.id;
+    if (!chatId) return;
+    const on = data === 'sub:on';
+    const users = store.read('users', {});
+    users[chatId] = {
+      ...(users[chatId] || { id: chatId }),
+      name: esc(cb.from && cb.from.first_name || 'друг'),
+      subAnnounce: on,
+    };
+    store.write('users', users);
+    await tgApi('answerCallbackQuery', {
+      callback_query_id: cb.id,
+      text: on ? 'Подписались на анонсы 🔔' : 'Отписались от анонсов',
+    });
+    // переключаем кнопку на противоположную — состояние видно прямо в чате
+    await tgApi('editMessageReplyMarkup', {
+      chat_id: chatId,
+      message_id: cb.message.message_id,
+      reply_markup: menuKeyboard(settings(), chatId, on),
+    });
+  }
+
+  async function notifyManagers(s, text) {
+    const appUrl = shopWebAppUrl(s);
+    let failed = 0;
+    for (const id of s.notify.chatIds) {
+      const payload = {
+        chat_id: id, text, parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        disable_notification: s.notify.silent,
+      };
+      // та же кнопка «Открыть», что у покупателя: web_app — только в личке,
+      // в группы (отрицательный chat_id) не пришиваем
+      if (appUrl && Number(id) > 0) {
+        payload.reply_markup = { inline_keyboard: [[{ text: s.bot.buttonText, web_app: { url: appUrl } }]] };
+      }
+      const res = await sendWithFallback(payload, `уведомление менеджеру ${id}`);
+      if (!res.ok) failed++;
+    }
+    return failed === 0;
+  }
+
+  // Анонс только явно подписавшимся: subAnnounce === true ставится кнопкой
+  // «🔔 Подписаться на анонсы» в приветствии или командой /subscribe.
+  // По умолчанию не подписан никто. Группы и каналы (отрицательный chat_id)
+  // не трогаем, потолок одной рассылки — 200 адресатов с паузой 35 мс,
+  // чтобы не влететь в глобальный лимит Telegram.
+  async function sendToSubscribers(text, label, s0) {
+    const s = s0 || settings();
+    const users = store.read('users', {});
+    const ids = Object.keys(users)
+      .filter(id => Number(id) > 0 && users[id] && users[id].subAnnounce === true)
+      .slice(0, 200);
+    if (!ids.length) {
+      console.log(`${tag} ${label}: подписчиков нет — пропускаю`);
+      return { sent: 0, total: 0 };
+    }
+    // кнопка мини-аппа, как у покупателей; если домен не привязан —
+    // sendWithFallback сам переотправит сообщение без неё
+    const appUrl = shopWebAppUrl(s);
+    const kb = appUrl
+      ? { inline_keyboard: [[{ text: s.bot.buttonText, web_app: { url: appUrl } }]] }
+      : undefined;
+    let sent = 0;
+    for (const id of ids) {
+      const res = await sendWithFallback({
+        chat_id: Number(id), text,
+        parse_mode: 'HTML', disable_web_page_preview: true,
+        reply_markup: kb,
+      }, `${label} подписчику ${id}`);
+      if (res.ok) sent++;
+      await sleep(35);
+    }
+    console.log(`${tag} ${label}: доставлено ${sent}/${ids.length} подписчикам`);
+    return { sent, total: ids.length };
+  }
+
+  async function poll() {
+    let failures = 0;
+    while (running) {
+      try {
+        // retries:0 здесь принципиально. Раньше шли ретраи по умолчанию, и при
+        // оборванном соединении один цикл опроса занимал до 3 × 35 с + паузы —
+        // около двух минут, в течение которых бот не отвечал вообще. Именно это
+        // выглядело как «после простоя бот долго просыпается»: NAT провайдера
+        // тихо выбрасывает простаивающий коннект, а мы этого не замечали.
+        // Цикл сам себе ретрай, дублировать его внутри tgApi не нужно.
+        const res = await tgApi(
+          'getUpdates',
+          { offset, timeout: POLL_TIMEOUT, allowed_updates: ['message', 'callback_query'] },
+          { retries: 0, timeoutMs: POLL_ABORT_MS }
+        );
+
+        if (res && res.ok) {
+          failures = 0;
+          for (const u of res.result) {
+            offset = u.update_id + 1;
+            try { await handleUpdate(u); } catch (e) { console.error(`${tag} update failed:`, e.message); }
+          }
+          continue; // сразу за следующей порцией, без пауз
+        }
+
+        if (res && /conflict/i.test(res.description || '')) {
+          // где-то ещё запущен второй экземпляр или висит вебхук
+          console.error(tag, res.description, '— снимаю вебхук и продолжаю');
+          await tgApi('deleteWebhook', {});
+          await sleep(5000);
+          continue;
+        }
+
+        // Сетевой сбой: первый раз переподключаемся мгновенно — обычно это как раз
+        // протухший коннект, и повтор проходит сразу. Дальше нарастающая пауза,
+        // чтобы не долбить недоступный сервер, но не больше 30 с.
+        failures++;
+        if (res && !res.ok) console.error(`${tag} getUpdates:`, res.description);
+        const wait = failures === 1 ? 0 : Math.min(30000, 2000 * failures);
+        if (wait) await sleep(wait);
+      } catch (e) {
+        failures++;
+        console.error(`${tag} poll error:`, e.message);
+        await sleep(Math.min(30000, 2000 * failures));
+      }
+    }
+  }
+
+  // Секрет вебхука выводим детерминированно из токенов, чтобы не заводить ещё одну
+  // переменную окружения: Telegram шлёт его в заголовке X-Telegram-Bot-Api-Secret-Token,
+  // и без этой проверки любой желающий мог бы слать боту поддельные апдейты POST-запросом.
+  function webhookSecret() {
+    return crypto.createHash('sha256')
+      .update(BOT_TOKEN + '|' + (t.adminToken || ''))
+      .digest('hex')
+      .slice(0, 48);
+  }
+
+  async function start() {
+    if (!BOT_TOKEN) {
+      console.warn(`${tag} BOT_TOKEN не задан — бот выключен, витрина работает без него`);
+      return;
+    }
+    const me = await tgApi('getMe', {});
+    if (!me.ok) {
+      console.error(`${tag} не удалось авторизоваться:`, me.description);
+      return;
+    }
+    await tgApi('setMyCommands', { commands: COMMANDS });
+
+    // Кнопка меню слева от поля ввода — её же видно в превью чата. Без этого
+    // вызова у бота стоит type=default («Open»/список команд), а если продавец
+    // когда-то вписал туда обычный url через BotFather — магазин открывается
+    // браузерным окном без обвязки Mini App. Ставим web_app программно,
+    // без chat_id = дефолт для всех приватных чатов. Текст ограничен 20 символами.
+    {
+      const s0 = settings();
+      const appUrl = shopWebAppUrl(s0);
+      if (appUrl) {
+        const mb = await tgApi('setChatMenuButton', {
+          menu_button: {
+            type: 'web_app',
+            text: menuButtonText(s0),
+            web_app: { url: appUrl },
+          },
+        });
+        if (mb.ok) console.log(`${tag} кнопка меню → web_app: ${appUrl}`);
+        // Подсказка по тексту ошибки: /setdomain помогает только при проблемах
+        // с URL, а «text must be non-empty» — это валидация самого текста.
+        else if (/url|domain/i.test(mb.description || '')) console.warn(`${tag} setChatMenuButton не удался:`, mb.description,
+          '— проверьте домен в @BotFather (/setdomain) или используйте t.me-ссылку мини-аппа');
+        else console.warn(`${tag} setChatMenuButton не удался:`, mb.description);
+      }
+    }
+
+    const publicUrl = String(t.publicUrl || '').replace(/\/$/, '');
+    const wantWebhook = String(t.botMode || '').toLowerCase() === 'webhook';
+
+    if (wantWebhook) {
+      // Telegram принимает вебхук только на портах 443, 80, 88 и 8443 и только по HTTPS
+      if (!/^https:\/\//i.test(publicUrl)) {
+        console.error(`${tag} BOT_MODE=webhook, но PUBLIC_URL не https — откатываюсь на long polling`);
+      } else {
+        const url = `${publicUrl}/api/webhook`;
+        const res = await tgApi('setWebhook', {
+          url,
+          secret_token: webhookSecret(),
+          allowed_updates: ['message', 'callback_query'],
+          max_connections: 40,
+        });
+        if (res.ok) {
+          console.log(`${tag} запущен как @${me.result.username}, режим: webhook → ${url}`);
+          return; // апдейты придёт приносить HTTP-сервер, опрос не нужен
+        }
+        console.error(`${tag} setWebhook не удался:`, res.description, '— откатываюсь на long polling');
+      }
+    }
+
+    console.log(`${tag} запущен как @${me.result.username}, режим: long polling`);
+    // long polling и вебхук взаимоисключающи — снимаем вебхук, иначе getUpdates не работает
+    await tgApi('deleteWebhook', { drop_pending_updates: false });
+    running = true;
+    poll();
+  }
+
+  function stop() { running = false; }
+
+  return {
+    start, stop, notifyManagers, sendToSubscribers, fill, normalize,
+    handleUpdate, webhookSecret, shopWebAppUrl, sendWithFallback, menuButtonText,
+  };
 }
 
-function stop() { running = false; }
-
-module.exports = { start, stop, notifyManagers, sendToSubscribers, fill, normalize, handleUpdate, webhookSecret, shopWebAppUrl, sendWithFallback };
+module.exports = { createBot, fill, normalize, menuButtonText };

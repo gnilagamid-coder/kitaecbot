@@ -9,8 +9,12 @@ const fs = require('node:fs');
 const test = require('node:test');
 const assert = require('node:assert');
 
-process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'tgshop-orders-'));
-const orders = require('../server/orders');
+const { createStore } = require('../server/store');
+const { createOrders, _internal } = require('../server/orders');
+
+// Свой экземпляр хранилища во временной папке: никакого глобального состояния,
+// тесты можно гонять параллельно и в любом порядке.
+const orders = createOrders(createStore(fs.mkdtempSync(path.join(os.tmpdir(), 'tgshop-orders-'))));
 
 const SETTINGS = {
   advanced: { locale: 'ru-RU', timezone: 'Europe/Moscow' },
@@ -136,7 +140,7 @@ test('CSV: кавычки, разделители и переносы внутр
 });
 
 test('CSV: дробные числа в русской локали пишутся с запятой', () => {
-  const { csvNumber } = orders._internal;
+  const { csvNumber } = _internal;
   assert.strictEqual(csvNumber(1234.5, 'ru-RU'), '1234,50');
   assert.strictEqual(csvNumber(1234, 'ru-RU'), '1234', 'целые без хвоста');
   assert.strictEqual(csvNumber(1234.5, 'en-US'), '1234.50');
