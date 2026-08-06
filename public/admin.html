@@ -258,6 +258,7 @@
 
 <div class="login" id="loginBox">
   <h1>Вход в админку</h1>
+  <div class="hint" style="margin-bottom:10px">Панель открывается из бота: команда /admin → «⚙️ Открыть панель».<br>Внутри Telegram вход для владельца происходит сам.</div>
   <input type="password" id="tokenInput" placeholder="Админ-токен" autocomplete="current-password">
   <button id="loginBtn">Войти</button>
   <div class="err" id="loginErr"></div>
@@ -303,6 +304,7 @@
 
 <!-- ?v= бампается при релизе: страхует от промежуточных прокси, которые
      игнорируют no-cache и держат старый shared.js поверх новой разметки -->
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <script src="/theme-core.js?v=2.4"></script>
 <script src="/shared.js?v=2.4"></script>
 <script>
@@ -1982,11 +1984,47 @@ $('tokenInput').onkeydown = e => { if(e.key === 'Enter') $('loginBtn').click(); 
 $('saveBtn').onclick = saveSettings;
 $('previewReload').onclick = () => { $('previewFrame').contentWindow.location.reload(); };
 
-// автологин в пределах сессии, чтобы не вводить токен после каждого обновления
-try{
-  const saved = sessionStorage.getItem('admin_token');
-  if(saved){ TOKEN = saved; init(); }
-}catch(e){}
+// Вход из Telegram: страница открыта как Mini App из бота, и initData
+// доказывает серверу, кто мы. Сервер пускает только chat_id из ADMIN_CHAT_IDS;
+// вместо вечного пароля получаем билет на 30 дней и кладём его в sessionStorage.
+async function tgAutoLogin(){
+  const tg = window.Telegram && window.Telegram.WebApp;
+  const initData = tg && tg.initData;
+  if(!initData) return false;
+  try{ tg.ready && tg.ready(); tg.expand && tg.expand(); }catch(e){}
+  try{
+    const res = await fetch('/api/admin/tg-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ initData }),
+    });
+    const d = await res.json().catch(()=>({}));
+    if(res.ok && d.token){
+      TOKEN = d.token;
+      try{ sessionStorage.setItem('admin_token', TOKEN); }catch(e){}
+      return true;
+    }
+    $('loginErr').textContent = res.status === 401
+      ? 'Доступ запрещён: панель открыта только владельцу магазина (chat_id из ADMIN_CHAT_IDS).'
+      : (d.error || 'Ошибка входа');
+  }catch(e){
+    $('loginErr').textContent = 'Сервер не отвечает';
+  }
+  return false;
+}
+
+// Порядок входа: ?token= в адресе (аварийный) → сохранённый в сессии →
+// автологин по initData Telegram → форма ручного входа как запасная.
+(async function boot(){
+  const urlToken = new URLSearchParams(location.search).get('token');
+  if(urlToken){ TOKEN = urlToken; if(await init()) return; }
+  try{
+    const saved = sessionStorage.getItem('admin_token');
+    if(saved){ TOKEN = saved; if(await init()) return; }
+  }catch(e){}
+  TOKEN = '';
+  if(await tgAutoLogin()) await init();
+})();
 
 // не терять несохранённые настройки при случайном закрытии
 window.addEventListener('beforeunload', e => { if(dirty){ e.preventDefault(); e.returnValue = ''; } });

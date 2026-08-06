@@ -55,6 +55,7 @@ const COMMANDS = [
   { command: 'unsubscribe', description: 'Не получать анонсы' },
   { command: 'support', description: 'Связаться с менеджером' },
   { command: 'id', description: 'Показать мой chat_id' },
+  { command: 'admin', description: 'Панель управления (владелец)' },
 ];
 
 // ---------- экземпляр бота одного магазина ----------
@@ -66,6 +67,8 @@ function createBot(t) {
   // Префикс в логах: когда процесс ведёт несколько магазинов, без него
   // непонятно, чей бот ругается.
   const tag = t.id ? `[bot:${t.id}]` : '[bot]';
+  // Владелец ли пишет: доступ к админке строго по списку из .env.
+  const isAdminChat = id => Array.isArray(t.adminChatIds) && t.adminChatIds.includes(Number(id));
 
   let offset = 0;
   let running = false;
@@ -189,6 +192,31 @@ function createBot(t) {
 
     if (text === '/id') {
       await tgApi('sendMessage', { chat_id: chatId, text: `Ваш chat_id: <code>${chatId}</code>`, parse_mode: 'HTML' });
+      return;
+    }
+
+    // Админка живёт в боте как Mini App. Команду видит любой, но кнопку
+    // получают только владельцы из ADMIN_CHAT_IDS — остальным вежливый отказ
+    // без подсказок о том, как устроена проверка.
+    if (text === '/admin') {
+      if (!isAdminChat(chatId)) {
+        await tgApi('sendMessage', { chat_id: chatId, text: '⛔ Панель управления доступна только владельцу магазина.' });
+        return;
+      }
+      const adminUrl = t.publicUrl ? `${t.publicUrl}/admin.html` : '';
+      if (!adminUrl) {
+        await tgApi('sendMessage', { chat_id: chatId, text: 'Админка ещё не настроена: нет PUBLIC_URL.' });
+        return;
+      }
+      // web_app — только в личке и только по https; иначе обычная ссылка
+      const button = /^https:\/\//i.test(adminUrl) && Number(chatId) > 0
+        ? { text: '⚙️ Открыть панель', web_app: { url: adminUrl } }
+        : { text: '⚙️ Открыть панель', url: adminUrl };
+      await sendWithFallback({
+        chat_id: chatId,
+        text: 'Панель управления магазином — откроется прямо в Telegram.',
+        reply_markup: { inline_keyboard: [[button]] },
+      }, 'кнопка админки');
       return;
     }
 

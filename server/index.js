@@ -37,6 +37,12 @@ const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const MAX_BODY = 8 * 1024 * 1024; // хватает на dataURL-картинку до ~6 МБ
 
+// Кому из Telegram открыта админка: chat_id владельцев через запятую.
+// Пусто — входа из бота нет, остаётся только ADMIN_TOKEN.
+const ADMIN_CHAT_IDS = String(process.env.ADMIN_CHAT_IDS || '')
+  .split(',').map(s => Number(s.trim()))
+  .filter(n => Number.isFinite(n) && n !== 0);
+
 if (!ADMIN_TOKEN) {
   console.error('ADMIN_TOKEN не задан в .env — админка была бы открыта всем. Выхожу.');
   process.exit(1);
@@ -54,6 +60,7 @@ const tenant = createTenant({
   publicUrl: process.env.PUBLIC_URL,
   apiBase: process.env.TELEGRAM_API_BASE,
   botMode: process.env.BOT_MODE,
+  adminChatIds: ADMIN_CHAT_IDS,
 });
 
 // Короткие имена, чтобы не переписывать полторы тысячи строк обработчиков.
@@ -117,10 +124,32 @@ function readBody(req) {
 
 // Сравнение токена без утечки времени — дайджест арендатора считается один раз
 // при его создании (см. tenant.js), здесь только сверка.
-function tokenOk(req) {
-  const given = String(req.headers['x-admin-token'] || '');
+function tokenOk(req, given = String(req.headers['x-admin-token'] || '')) {
   const hash = crypto.createHash('sha256').update(given).digest();
   return crypto.timingSafeEqual(hash, tenant.adminHash);
+}
+
+// Админка из Telegram выдаёт билеты вместо вечного ADMIN_TOKEN: подпись на
+// ключе ADMIN_TOKEN + срок жизни. Таблицы сессий нет — отзыв происходит сам:
+// билет протух, владелец выпал из ADMIN_CHAT_IDS, ADMIN_TOKEN поменялся.
+const ADMIN_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+function issueAdminSession(userId) {
+  const exp = Date.now() + ADMIN_SESSION_TTL_MS;
+  const payload = `a1.${userId}.${exp}`;
+  const sig = crypto.createHmac('sha256', ADMIN_TOKEN).update(payload).digest('hex');
+  return `${payload}.${sig}`;
+}
+function adminSessionOk(raw) {
+  const m = /^a1\.(-?\d+)\.(\d+)\.([0-9a-f]{64})$/.exec(String(raw || ''));
+  if (!m) return false;
+  const [, uid, exp, sig] = m;
+  if (Number(exp) < Date.now()) return false;
+  // выпавших из списка допуска не пускаем даже с живой подписью
+  if (!ADMIN_CHAT_IDS.includes(Number(uid))) return false;
+  const expected = crypto.createHmac('sha256', ADMIN_TOKEN).update(`a1.${uid}.${exp}`).digest('hex');
+  const a = Buffer.from(expected, 'utf8');
+  const b = Buffer.from(sig, 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
 // простейший rate limit по IP — чтобы форму заказа нельзя было залить спамом
@@ -390,6 +419,19 @@ async function serveStatic(req, res, urlPath) {
   if (rel === '/' || rel === '') rel = '/index.html';
   const full = path.join(PUBLIC_DIR, path.normalize(rel).replace(/^(\.\.[/\\])+/, ''));
   if (!full.startsWith(PUBLIC_DIR)) { res.writeHead(403); return res.end('forbidden'); }
+
+  // Админка переехала в бота: обычному браузеру страница не отдаётся.
+  // Исключений два — открыто внутри Telegram WebApp либо аварийный вход
+  // ?token=<ADMIN_TOKEN> (для обслуживания, в документации не светится).
+  // Настоящая защита всё равно на API: страница без токена ничего не может.
+  if (rel === '/admin.html') {
+    const inTelegram = /Telegram/i.test(String(req.headers['user-agent'] || ''));
+    const q = new URL(req.url, 'http://localhost').searchParams;
+    if (!inTelegram && !tokenOk(req, String(q.get('token') || ''))) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('404');
+    }
+  }
 
   try {
     const stat = await fsp.stat(full);
@@ -852,6 +894,28 @@ async function handleApi(req, res, url) {
     return json(res, 200, { ok: true });
   }
 
+  // Вход в админку из Telegram (Mini App, открытое из бота). Стоит ДО
+  // токен-гейта: этот запрос сам и добывает себе пропуск. initData доказывает,
+  // что человек действительно из Telegram, а ADMIN_CHAT_IDS решает, владелец ли он.
+  // Ответ на «не тот» и «не из списка» одинаковый — перебором список не выяснить.
+  if (p === '/api/admin/tg-login' && method === 'POST') {
+    if (!rateLimit('admin:' + ip, 60, 60000)) return json(res, 429, { error: 'too many requests' });
+    const gate = authguard.check(ip);
+    if (!gate.allowed) {
+      const sec = Math.ceil(gate.retryAfterMs / 1000);
+      res.setHeader('Retry-After', String(sec));
+      return json(res, 429, { error: `Слишком много неудачных попыток входа. Подождите ${sec} с.` });
+    }
+    let body; try { body = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
+    const user = validateInitData(String(body.initData || ''));
+    if (!user || !ADMIN_CHAT_IDS.includes(Number(user.id))) {
+      authguard.fail(ip);
+      return json(res, 401, { error: 'unauthorized' });
+    }
+    authguard.succeed(ip);
+    return json(res, 200, { ok: true, token: issueAdminSession(user.id), name: user.first_name || '' });
+  }
+
   // ===== админка =====
   if (p.startsWith('/api/admin/')) {
     if (!rateLimit('admin:' + ip, 60, 60000)) return json(res, 429, { error: 'too many requests' });
@@ -865,7 +929,9 @@ async function handleApi(req, res, url) {
       res.setHeader('Retry-After', String(sec));
       return json(res, 429, { error: `Слишком много неудачных попыток входа. Подождите ${sec} с.` });
     }
-    if (!tokenOk(req)) {
+    // Пускает либо вечный ADMIN_TOKEN, либо билет из Telegram (см. issueAdminSession)
+    const givenAdminToken = String(req.headers['x-admin-token'] || '');
+    if (!tokenOk(req, givenAdminToken) && !adminSessionOk(givenAdminToken)) {
       const r = authguard.fail(ip);
       if (r.retryAfterMs) {
         console.warn(`[admin] неверный токен с ${ip}: попытка ${r.fails}, пауза ${Math.ceil(r.retryAfterMs / 1000)} с`);

@@ -41,13 +41,19 @@ try {
     Check "неверный токен отвергается (status=$($_.Exception.Response.StatusCode.value__))" ([int]$_.Exception.Response.StatusCode -ge 400)
 }
 
-# 5. Статика Mini App и админки
+# 5. Статика Mini App и админки (админка живёт в боте: браузеру без токена закрыта)
 try {
     $idx = Invoke-WebRequest "$base/" -TimeoutSec 5
-    $adm = Invoke-WebRequest "$base/admin.html" -TimeoutSec 5
+    $adm = Invoke-WebRequest "$base/admin.html?token=$adminToken" -TimeoutSec 5
     Check "витрина / отдаётся" ($idx.StatusCode -eq 200)
-    Check "админка /admin.html отдаётся" ($adm.StatusCode -eq 200)
+    Check "админка отдаётся с аварийным токеном" ($adm.StatusCode -eq 200)
 } catch { Check "статика отдаётся ($($_.Exception.Message))" $false }
+try {
+    $null = Invoke-WebRequest "$base/admin.html" -TimeoutSec 5 -ErrorAction Stop
+    Check "админка браузеру без токена закрыта" $false
+} catch {
+    Check "админка браузеру без токена закрыта (404)" ([int]$_.Exception.Response.StatusCode -eq 404)
+}
 
 Write-Host ""
 Write-Host "Smoke: $pass ok, $fail fail"

@@ -28,6 +28,7 @@ function createTenant({
   publicUrl = '',
   apiBase = DEFAULT_API_BASE,
   botMode = 'polling',
+  adminChatIds = [],
 } = {}) {
   const store = createStore(dataDir);
 
@@ -39,6 +40,9 @@ function createTenant({
     adminToken,
     publicUrl: String(publicUrl || '').replace(/\/$/, ''),
     botMode,
+    // Кому из телеграма открыта админка (chat_id владельцев). Пусто —
+    // входа из бота нет, остаётся только ADMIN_TOKEN.
+    adminChatIds,
 
     // Настройки всегда отдаются уже нормализованными: витрина и админка
     // про дефолты ничего не знают, за них отвечает settings.js.

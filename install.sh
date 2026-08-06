@@ -30,11 +30,12 @@ say "Node $(node -v)"
 # ---------- параметры ----------
 # Если магазин уже стоит, подставляем прежние значения как ответы по умолчанию:
 # повторный запуск не должен молча выдать новый пароль админки или стереть токен.
-OLD_BOT_TOKEN=""; OLD_ADMIN_TOKEN=""; OLD_PORT=""; OLD_DOMAIN=""
+OLD_BOT_TOKEN=""; OLD_ADMIN_TOKEN=""; OLD_PORT=""; OLD_DOMAIN=""; OLD_ADMIN_CHAT_IDS=""
 if [ -f "$APP_DIR/.env" ]; then
   # shellcheck disable=SC1090
   OLD_BOT_TOKEN="$(grep -E '^BOT_TOKEN=' "$APP_DIR/.env" | cut -d= -f2- || true)"
   OLD_ADMIN_TOKEN="$(grep -E '^ADMIN_TOKEN=' "$APP_DIR/.env" | cut -d= -f2- || true)"
+  OLD_ADMIN_CHAT_IDS="$(grep -E '^ADMIN_CHAT_IDS=' "$APP_DIR/.env" | cut -d= -f2- || true)"
   OLD_PORT="$(grep -E '^PORT=' "$APP_DIR/.env" | cut -d= -f2- || true)"
   OLD_DOMAIN="$(grep -E '^PUBLIC_URL=' "$APP_DIR/.env" | sed -E 's|^PUBLIC_URL=https?://||; s|:[0-9]+$||' || true)"
   echo
@@ -65,9 +66,15 @@ chown -R tgshop:tgshop "$APP_DIR"
 PUBLIC_URL="http://$(hostname -I | awk '{print $1}'):${PORT}"
 [ -n "$DOMAIN" ] && PUBLIC_URL="https://${DOMAIN}"
 
+# Список владельцев для входа в админку из бота. При установке его ещё нет
+# (chat_id узнаётся командой /id у уже запущенного бота) — при повторном
+# запуске просто сохраняем прежнее значение.
+ADMIN_CHAT_IDS="$OLD_ADMIN_CHAT_IDS"
+
 cat > "$APP_DIR/.env" <<EOF
 BOT_TOKEN=${BOT_TOKEN}
 ADMIN_TOKEN=${ADMIN_TOKEN}
+ADMIN_CHAT_IDS=${ADMIN_CHAT_IDS}
 PORT=${PORT}
 HOST=127.0.0.1
 PUBLIC_URL=${PUBLIC_URL}
@@ -154,7 +161,9 @@ cat <<EOF
   Готово.
 
   Витрина:  ${PUBLIC_URL}/
-  Админка:  ${PUBLIC_URL}/admin.html
+  Админка:  в боте команда /admin (сначала впишите свой chat_id
+            в ${APP_DIR}/.env: ADMIN_CHAT_IDS=<id>, узнать: /id у бота)
+  Аварийный вход: ${PUBLIC_URL}/admin.html?token=${ADMIN_TOKEN}
   Пароль:   ${ADMIN_TOKEN}
 
   Осталось в @BotFather:

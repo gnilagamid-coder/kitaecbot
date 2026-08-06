@@ -66,6 +66,7 @@ id -u tgshop >/dev/null 2>&1 || useradd --system --home "$BASE_DIR" --shell /usr
 cat > "$APP_DIR/.env" <<EOF
 BOT_TOKEN=${BOT_TOKEN}
 ADMIN_TOKEN=${ADMIN_TOKEN}
+ADMIN_CHAT_IDS=
 PORT=${PORT}
 HOST=127.0.0.1
 PUBLIC_URL=https://${DOMAIN}
@@ -145,7 +146,9 @@ cat <<EOF
   Магазин «${SLUG}» поднят.
 
   Витрина:  https://${DOMAIN}/
-  Админка:  https://${DOMAIN}/admin.html
+  Админка:  в боте команда /admin (впишите свой chat_id в ${APP_DIR}/.env:
+            ADMIN_CHAT_IDS=<id>, узнать: /id у бота, затем рестарт)
+  Аварийный вход: https://${DOMAIN}/admin.html?token=${ADMIN_TOKEN}
   Пароль:   ${ADMIN_TOKEN}
   Порт:     ${PORT}
   Данные:   ${APP_DIR}/data
