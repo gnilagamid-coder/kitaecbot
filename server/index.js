@@ -24,6 +24,8 @@ const { execFile } = require('node:child_process');
 })();
 
 const store = require('./store');
+const ordersRepo = require('./orders');
+const authguard = require('./authguard');
 const { sanitize } = require('./settings');
 const { tgApi, validateInitData, esc, BOT_TOKEN, API_BASE } = require('./telegram');
 const bot = require('./bot');
@@ -644,9 +646,7 @@ async function handleApi(req, res, url) {
       status: 'new',
     };
     if (promo) consumePromo(promo.code);
-    const orders = store.read('orders', []);
-    orders.unshift(order);
-    store.write('orders', orders.slice(0, 500));
+    ordersRepo.add(order);
 
     // списываем остатки, если они заданы
     let changed = false;
@@ -717,19 +717,26 @@ async function handleApi(req, res, url) {
     const s = getSettings();
     if (!s.payments.enabled) return json(res, 400, { error: 'онлайн-оплата выключена' });
 
-    const orders = store.read('orders', []);
-    const order = orders.find(o => o.id === Number(body.orderId));
+    const order = ordersRepo.find(body.orderId);
     if (!order) return json(res, 404, { error: 'заказ не найден' });
     if (order.paid) return json(res, 400, { error: 'заказ уже оплачен' });
 
     const provider = payments.getProvider(s.payments.provider);
     if (!provider) return json(res, 400, { error: 'платёжный провайдер не настроен' });
 
+    // Одноразовый ключ на возврат из платёжного сервиса. Мерчант приводит
+    // покупателя обратно на PUBLIC_URL/?paid=<id>&t=<ключ>, и витрина по нему
+    // спрашивает у нас настоящий статус. Без ключа адрес был бы оракулом:
+    // номера заказов — это Date.now(), их легко перебрать и узнать, кто и что
+    // оплатил. Ключ живёт в самом заказе и наружу больше нигде не появляется.
+    const returnToken = order.returnToken || crypto.randomBytes(16).toString('hex');
+
     let result;
     try {
       result = await provider.createPayment(s.payments.creds, order, {
         currencyCode: s.payments.currencyCode,
         publicUrl: (process.env.PUBLIC_URL || '').replace(/\/$/, ''),
+        returnToken,
       });
     } catch (e) {
       console.error('[pay] createPayment failed:', e.message);
@@ -737,9 +744,32 @@ async function handleApi(req, res, url) {
     }
     if (!result.ok) return json(res, 502, { error: result.error || 'не удалось создать платёж' });
 
-    order.payment = { provider: s.payments.provider, externalId: result.externalId, at: new Date().toISOString() };
-    store.write('orders', orders);
+    ordersRepo.update(order.id, {
+      returnToken,
+      payment: { provider: s.payments.provider, externalId: result.externalId, at: new Date().toISOString() },
+    });
     return json(res, 200, { ok: true, url: result.url, manual: !!result.manual });
+  }
+
+  // Статус оплаты для экрана возврата. Раньше витрина верила адресной строке:
+  // «?paid=123» рисовало «Оплата получена», хотя денег могло не быть — платёж
+  // подтверждается колбэком мерчанта, а не редиректом браузера. Отдаём только
+  // факт оплаты и ничего о покупателе, и только по ключу из самого заказа.
+  if (p === '/api/pay/status' && method === 'GET') {
+    if (!rateLimit('paystatus:' + ip, 60, 60000)) return json(res, 429, { error: 'слишком много запросов' });
+    const order = ordersRepo.find(url.searchParams.get('id'));
+    const given = String(url.searchParams.get('t') || '');
+    const expected = String(order && order.returnToken || '');
+    // Сравнение по дайджестам: длина ключа наружу тоже не утекает, а
+    // несуществующий заказ и неверный ключ дают одинаковый ответ.
+    const a = crypto.createHash('sha256').update(given).digest();
+    const b = crypto.createHash('sha256').update(expected).digest();
+    if (!expected || !crypto.timingSafeEqual(a, b)) return json(res, 404, { error: 'not found' });
+    return json(res, 200, {
+      ok: true,
+      paid: !!order.paid,
+      status: order.paid ? 'paid' : (order.paymentStatus || 'pending'),
+    });
   }
 
   // Колбэк от платёжного мерчанта. Подпись/секрет проверяет сам провайдер.
@@ -758,19 +788,23 @@ async function handleApi(req, res, url) {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('ok');
 
-    const orders = store.read('orders', []);
-    const order = orders.find(o => o.id === Number(check.orderId));
+    const order = ordersRepo.find(check.orderId);
+    // Повторный колбэк по уже оплаченному заказу игнорируем целиком: мерчанты
+    // ретраят доставку, и без этой проверки менеджер получал бы по уведомлению
+    // на каждую попытку.
     if (!order || order.paid) return;
-    order.paymentStatus = check.status;
+    const patch = { paymentStatus: check.status };
     if (check.paid) {
-      order.paid = true;
-      order.paidAt = new Date().toISOString();
+      patch.paid = true;
+      patch.paidAt = new Date().toISOString();
+    }
+    ordersRepo.update(order.id, patch);
+    if (check.paid) {
       await bot.notifyManagers(s, `💳 <b>Заказ №${order.id} оплачен</b>\n\nСумма: ${money(order.total, s)}`).catch(() => {});
       if (order.user) {
         await tgApi('sendMessage', { chat_id: order.user.id, text: s.payments.successText }).catch(() => {});
       }
     }
-    store.write('orders', orders);
     return;
   }
 
@@ -794,7 +828,24 @@ async function handleApi(req, res, url) {
   // ===== админка =====
   if (p.startsWith('/api/admin/')) {
     if (!rateLimit('admin:' + ip, 60, 60000)) return json(res, 429, { error: 'too many requests' });
-    if (!tokenOk(req)) return json(res, 401, { error: 'unauthorized' });
+
+    // Подбор пароля: общий лимит в 60 запросов в минуту неудачные попытки
+    // никак не удорожал, и перебор с одного адреса шёл бесконечно. Теперь
+    // после нескольких ошибок адрес уходит в растущую паузу.
+    const gate = authguard.check(ip);
+    if (!gate.allowed) {
+      const sec = Math.ceil(gate.retryAfterMs / 1000);
+      res.setHeader('Retry-After', String(sec));
+      return json(res, 429, { error: `Слишком много неудачных попыток входа. Подождите ${sec} с.` });
+    }
+    if (!tokenOk(req)) {
+      const r = authguard.fail(ip);
+      if (r.retryAfterMs) {
+        console.warn(`[admin] неверный токен с ${ip}: попытка ${r.fails}, пауза ${Math.ceil(r.retryAfterMs / 1000)} с`);
+      }
+      return json(res, 401, { error: 'unauthorized' });
+    }
+    authguard.succeed(ip);
 
     if (p === '/api/admin/settings') {
       if (method === 'GET') return json(res, 200, getSettings());
@@ -898,20 +949,54 @@ async function handleApi(req, res, url) {
       return json(res, 200, { broken, logoBroken });
     }
 
+    // Выгрузка в CSV — всё, включая архив. Отдаём файлом, а не JSON: продавцу
+    // нужно открыть это в Excel, а не разбирать глазами.
+    if (p === '/api/admin/orders/export.csv' && method === 'GET') {
+      const csv = ordersRepo.toCSV(ordersRepo.all(), getSettings());
+      const buf = Buffer.from(csv, 'utf8');
+      res.writeHead(200, {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Length': buf.length,
+        'Content-Disposition': `attachment; filename="orders-${new Date().toISOString().slice(0, 10)}.csv"`,
+        'Cache-Control': 'no-store',
+      });
+      return res.end(buf);
+    }
+
     if (p === '/api/admin/orders') {
-      if (method === 'GET') return json(res, 200, store.read('orders', []));
-      if (method === 'DELETE') { store.write('orders', []); return json(res, 200, { ok: true }); }
+      if (method === 'GET') {
+        return json(res, 200, {
+          ...ordersRepo.list({
+            status: url.searchParams.get('status') || '',
+            offset: url.searchParams.get('offset'),
+            limit: url.searchParams.get('limit'),
+          }),
+          counts: ordersRepo.stats().byStatus,
+          statuses: ordersRepo.STATUSES.map(k => [k, ordersRepo.STATUS_LABELS[k]]),
+        });
+      }
+      // Смена статуса. Отдельный метод, а не PUT всего заказа: заказ — это
+      // документ покупателя, менять в нём что-то кроме статуса продавцу нельзя.
+      if (method === 'PATCH') {
+        let b; try { b = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
+        const updated = ordersRepo.setStatus(b.id, String(b.status || ''));
+        if (!updated) return json(res, 400, { error: 'заказ не найден или статус неизвестен' });
+        return json(res, 200, { ok: true, order: updated });
+      }
+      if (method === 'DELETE') { ordersRepo.clearAll(); return json(res, 200, { ok: true }); }
     }
 
     if (p === '/api/admin/stats' && method === 'GET') {
-      const orders = store.read('orders', []);
       const products = store.read('products', []);
       const views = store.read('views', {});
-      const revenue = orders.reduce((s2, o) => s2 + (o.total || 0), 0);
+      // Выручка считается без отменённых заказов — иначе цифра в админке
+      // расходится с деньгами на счёте, и доверия к ней нет.
+      const o = ordersRepo.stats();
       return json(res, 200, {
         products: products.length,
-        orders: orders.length,
-        revenue,
+        orders: o.total,
+        revenue: o.revenue,
+        ordersByStatus: o.byStatus,
         views: Object.values(views).reduce((a, b) => a + b, 0),
         users: Object.keys(store.read('users', {})).length,
         botConnected: !!BOT_TOKEN,

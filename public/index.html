@@ -2368,32 +2368,69 @@ if(IS_PREVIEW){
 // разметкой и не дёргаем SDK.
 (function handlePaymentReturn(){
   const q = new URLSearchParams(location.search);
-  const paid = q.get('paid'), failed = q.get('failed');
+  const paid = q.get('paid'), failed = q.get('failed'), token = q.get('t');
   if(!paid && !failed) return;
+  const orderId = paid || failed;
 
-  const show = () => {
-    const ok = !!paid;
-    const box = document.createElement('div');
-    box.className = 'pay-return';
+  const box = document.createElement('div');
+  box.className = 'pay-return';
+  const render = (kind, title, text) => {
     box.innerHTML = `
-      <div class="pay-card ${ok ? 'ok' : 'bad'}">
-        <div class="pay-icon">${ok ? '✓' : '!'}</div>
-        <div class="pay-title">${ok ? 'Оплата получена' : 'Оплата не прошла'}</div>
-        <div class="pay-text">${ok
-          ? esc((settings && settings.payments && settings.payments.successText) || 'Спасибо! Заказ оплачен.')
-          : 'Деньги не списаны. Можно попробовать ещё раз или написать менеджеру.'}</div>
-        <div class="pay-order">Заказ №${esc(paid || failed)}</div>
-        <button class="checkout-btn" id="payBackBtn">Вернуться в магазин</button>
+      <div class="pay-card ${kind === 'ok' ? 'ok' : 'bad'}">
+        <div class="pay-icon">${kind === 'ok' ? '✓' : kind === 'wait' ? '…' : '!'}</div>
+        <div class="pay-title">${esc(title)}</div>
+        <div class="pay-text">${esc(text)}</div>
+        <div class="pay-order">Заказ №${esc(orderId)}</div>
+        ${kind === 'wait' ? '' : `<button class="checkout-btn" id="payBackBtn">Вернуться в магазин</button>`}
       </div>`;
-    document.body.appendChild(box);
-    document.getElementById('payBackBtn').onclick = () => {
+    const back = document.getElementById('payBackBtn');
+    if(back) back.onclick = () => {
       box.remove();
       // чистим адрес, чтобы обновление страницы не показывало экран снова
       history.replaceState(null, '', location.pathname);
     };
   };
+
+  // Возврат от мерчанта сам по себе не значит «оплачено»: покупатель мог
+  // закрыть страницу оплаты, а адрес с ?paid= вообще открывается руками.
+  // Единственный источник правды — колбэк мерчанта, поэтому спрашиваем статус
+  // у сервера. Колбэк иногда приходит на секунду-две позже редиректа, отсюда
+  // несколько попыток вместо одной.
+  async function verify(attempt){
+    try{
+      const res = await fetch(`/api/pay/status?id=${encodeURIComponent(orderId)}&t=${encodeURIComponent(token || '')}`);
+      if(res.ok){
+        const d = await res.json();
+        if(d.paid){
+          render('ok', 'Оплата получена',
+            (settings && settings.payments && settings.payments.successText) || 'Спасибо! Заказ оплачен.');
+          return;
+        }
+      }
+    }catch(e){ /* сеть моргнула — ниже решим по числу попыток */ }
+
+    if(attempt < 3){
+      render('wait', 'Проверяем оплату', 'Это занимает несколько секунд.');
+      setTimeout(() => verify(attempt + 1), 2000);
+      return;
+    }
+    // Больше не ждём. Формулировка намеренно осторожная: мы не знаем, что
+    // деньги не ушли — мы знаем только, что подтверждения пока нет.
+    if(failed){
+      render('bad', 'Оплата не прошла', 'Деньги не списаны. Можно попробовать ещё раз или написать менеджеру.');
+    } else {
+      render('bad', 'Оплата пока не подтверждена',
+        'Если деньги списались, заказ отметится оплаченным в течение нескольких минут. Менеджер это увидит.');
+    }
+  }
+
+  const start = () => {
+    render('wait', 'Проверяем оплату', 'Это занимает несколько секунд.');
+    document.body.appendChild(box);
+    verify(1);
+  };
   // ждём настройки ради текста и темы, но не дольше секунды
-  if(settings) show(); else setTimeout(show, 900);
+  if(settings) start(); else setTimeout(start, 900);
 })();
 
 // порядок важен: сперва тема (иначе увидим вспышку дефолтной), потом товары
