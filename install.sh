@@ -70,6 +70,11 @@ rsync -a --delete \
   "$SRC_DIR"/ "$APP_DIR"/
 mkdir -p "$APP_DIR/data/images"
 
+say "Ставлю зависимости"
+# mysql2 нужен сервису даже в файловом режиме (server/db.js грузится всегда),
+# а node_modules в копию не попадает — ставим из package-lock.
+( cd "$APP_DIR" && { npm ci --omit=dev --silent || npm install --omit=dev --silent; } )
+
 id -u tgshop >/dev/null 2>&1 || useradd --system --home "$APP_DIR" --shell /usr/sbin/nologin tgshop
 chown -R tgshop:tgshop "$APP_DIR"
 

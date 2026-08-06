@@ -194,6 +194,97 @@ bash install.sh
 Проверьте: откройте в браузере `https://mojshop.duckdns.org/` — должна открыться
 витрина с надписью «Каталог пока пуст», а в адресной строке замочек.
 
+### Установка вручную, командами (без install.sh)
+
+Те же шаги установщика по порядку — если хочется делать руками.
+Замените `mojshop.duckdns.org` на свой домен, порт — на свой:
+
+```bash
+# 1. Пакеты и Node 24
+apt update && apt install -y curl ca-certificates gnupg rsync nginx
+curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+apt install -y nodejs
+
+# 2. Код в /opt/tg-shop + зависимости
+mkdir -p /opt/tg-shop
+rsync -a --exclude data --exclude .env --exclude .git --exclude node_modules /root/tg-shop/ /opt/tg-shop/
+mkdir -p /opt/tg-shop/data/images
+cd /opt/tg-shop && npm ci --omit=dev
+useradd --system --home /opt/tg-shop --shell /usr/sbin/nologin tgshop
+chown -R tgshop:tgshop /opt/tg-shop
+
+# 3. nginx-прокси (кавычки у EOF обязательны — внутри переменные nginx)
+cat > /etc/nginx/sites-available/tg-shop <<'EOF'
+server {
+    listen 80;
+    server_name mojshop.duckdns.org;
+    client_max_body_size 12m;
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+ln -sf /etc/nginx/sites-available/tg-shop /etc/nginx/sites-enabled/tg-shop
+rm -f /etc/nginx/sites-enabled/default
+nginx -t && systemctl reload nginx
+
+# 4. HTTPS-сертификат (A-запись домена уже должна смотреть на сервер)
+apt install -y certbot python3-certbot-nginx
+certbot --nginx -d mojshop.duckdns.org --non-interactive --agree-tos --register-unsafely-without-email --redirect
+
+# 5. .env — вебхук включаем только после рабочего HTTPS
+cat > /opt/tg-shop/.env <<'EOF'
+BOT_TOKEN=<токен от BotFather>
+ADMIN_TOKEN=<пароль в админку>
+ADMIN_CHAT_IDS=
+PORT=3000
+HOST=127.0.0.1
+PUBLIC_URL=https://mojshop.duckdns.org
+DATA_DIR=/opt/tg-shop/data
+BOT_MODE=webhook
+BOT_STRICT_WEBHOOK=1
+EOF
+chown tgshop:tgshop /opt/tg-shop/.env && chmod 600 /opt/tg-shop/.env
+
+# 6. systemd-сервис
+cat > /etc/systemd/system/tg-shop.service <<'EOF'
+[Unit]
+Description=Telegram Mini App Shop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tgshop
+WorkingDirectory=/opt/tg-shop
+EnvironmentFile=/opt/tg-shop/.env
+ExecStart=/usr/bin/node /opt/tg-shop/server/index.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/tg-shop/data
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now tg-shop
+
+# 7. Проверка: в журнале должна быть строка «режим: webhook»
+journalctl -u tg-shop -n 30 --no-pager
+curl -s "https://api.telegram.org/bot<ТОКЕН>/getWebhookInfo"
+```
+
+Последняя команда должна вернуть `"url":"https://mojshop.duckdns.org/api/webhook"` —
+значит, Telegram сама доставляет апдейты на сервер.
+
 ---
 
 ### Шаг 7. Подключить витрину к Telegram
