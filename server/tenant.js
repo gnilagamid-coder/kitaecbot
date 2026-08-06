@@ -13,6 +13,7 @@
 // поведение не поменялось ни на байт. Многоарендный роутинг — следующий этап,
 // а это фундамент под него.
 
+const path = require('node:path');
 const crypto = require('node:crypto');
 const { createStore } = require('./store');
 const { createOrders } = require('./orders');
@@ -20,21 +21,48 @@ const { createTelegram, DEFAULT_API_BASE } = require('./telegram');
 const { createBot } = require('./bot');
 const { sanitize } = require('./settings');
 
+// Бэкенд хранилища выбирается здесь и больше нигде: всё остальное работает
+// через один и тот же интерфейс и о выборе не знает.
+//   file   — JSON-файлы, как было всегда; работает на любом Node 18+
+//   sqlite — одна база, заказы отдельной таблицей; нужен Node 22.5+
+function buildStorage({ backend, dataDir, dbFile }) {
+  const dir = dataDir || path.join(__dirname, '..', 'data');
+
+  if (backend === 'sqlite') {
+    // require ленивый: на Node 20 файловый бэкенд обязан работать, а не падать
+    // из-за отсутствующего node:sqlite при загрузке модуля.
+    const { openAndMigrate } = require('./db');
+    const { createSqliteStore } = require('./store-sqlite');
+    const { createSqlOrders } = require('./orders-sqlite');
+    const db = openAndMigrate(dbFile || path.join(dir, 'shop.db'), { log: console.log });
+    const store = createSqliteStore({ db, imgDir: path.join(dir, 'images') });
+    return { store, orders: createSqlOrders(db), db };
+  }
+
+  const store = createStore(dir);
+  return { store, orders: createOrders(store), db: null };
+}
+
 function createTenant({
   id = '',
   dataDir,
+  dbFile = '',
+  backend = 'file',
   botToken = '',
   adminToken = '',
   publicUrl = '',
   apiBase = DEFAULT_API_BASE,
   botMode = 'polling',
 } = {}) {
-  const store = createStore(dataDir);
+  const storage = buildStorage({ backend, dataDir, dbFile });
+  const store = storage.store;
 
   const tenant = {
     id,
+    backend,
     store,
-    orders: createOrders(store),
+    db: storage.db,
+    orders: storage.orders,
     telegram: createTelegram({ botToken, apiBase }),
     adminToken,
     publicUrl: String(publicUrl || '').replace(/\/$/, ''),

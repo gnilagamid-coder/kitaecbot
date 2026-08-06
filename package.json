@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "private": true,
   "description": "Кастомизируемый магазин-конструктор для Telegram Mini Apps. Работает на VPS, зависимостей нет.",
-  "engines": { "node": ">=18" },
+  "engines": { "node": ">=18", "//": "файловое хранилище — от 18; STORE_BACKEND=sqlite требует 22.5+ (без флага с 23.4)" },
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
