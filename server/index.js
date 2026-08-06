@@ -23,12 +23,10 @@ const { execFile } = require('node:child_process');
   } catch (e) { /* нет .env — значит переменные пришли из окружения */ }
 })();
 
-const store = require('./store');
-const ordersRepo = require('./orders');
 const authguard = require('./authguard');
-const { sanitize } = require('./settings');
-const { tgApi, validateInitData, esc, BOT_TOKEN, API_BASE } = require('./telegram');
-const bot = require('./bot');
+const { createTenant } = require('./tenant');
+const { sanitize, mergeDeep } = require('./settings');
+const { esc } = require('./telegram');
 const payments = require('./payments');
 const { resolveTheme, onAccentColor } = require('../public/theme-core.js');
 
@@ -42,6 +40,27 @@ if (!ADMIN_TOKEN) {
   console.error('ADMIN_TOKEN не задан в .env — админка была бы открыта всем. Выхожу.');
   process.exit(1);
 }
+
+// Единственный пока арендатор, собранный из окружения — ровно то же, что
+// модули раньше читали каждый сам за себя. Когда появится роутинг по домену,
+// здесь встанет реестр арендаторов, а обработчики ниже не изменятся: они уже
+// работают с объектом, а не с глобальным состоянием.
+const tenant = createTenant({
+  id: process.env.SHOP_ID || '',
+  dataDir: process.env.DATA_DIR,
+  botToken: process.env.BOT_TOKEN,
+  adminToken: ADMIN_TOKEN,
+  publicUrl: process.env.PUBLIC_URL,
+  apiBase: process.env.TELEGRAM_API_BASE,
+  botMode: process.env.BOT_MODE,
+});
+
+// Короткие имена, чтобы не переписывать полторы тысячи строк обработчиков.
+// На следующем этапе эти строки заменит выбор арендатора по домену запроса.
+const store = tenant.store;
+const ordersRepo = tenant.orders;
+const bot = tenant.bot;
+const { tgApi, validateInitData, BOT_TOKEN, API_BASE } = tenant.telegram;
 
 // ---------- утилиты ----------
 const TEXTUAL = new Set(['.html', '.js', '.css', '.json', '.svg']);
@@ -86,14 +105,12 @@ function readBody(req) {
   });
 }
 
-// Сравнение токена без утечки времени. Сравниваем именно sha256-дайджесты:
-// timingSafeEqual требует равной длины буферов и бросает исключение при разной,
-// а токен может быть любым — в том числе кириллицей, где длина в байтах ≠ длине строки.
-const ADMIN_HASH = crypto.createHash('sha256').update(ADMIN_TOKEN).digest();
+// Сравнение токена без утечки времени — дайджест арендатора считается один раз
+// при его создании (см. tenant.js), здесь только сверка.
 function tokenOk(req) {
   const given = String(req.headers['x-admin-token'] || '');
   const hash = crypto.createHash('sha256').update(given).digest();
-  return crypto.timingSafeEqual(hash, ADMIN_HASH);
+  return crypto.timingSafeEqual(hash, tenant.adminHash);
 }
 
 // простейший rate limit по IP — чтобы форму заказа нельзя было залить спамом
@@ -107,7 +124,7 @@ function rateLimit(ip, max, windowMs) {
 }
 setInterval(() => { const now = Date.now(); for (const [k, v] of hits) if (now - v.start > 600000) hits.delete(k); }, 600000).unref();
 
-function getSettings() { return sanitize(store.read('settings', {})); }
+const getSettings = () => tenant.settings();
 
 // ---------- состояние VPS (карточка «Сервер» в админке) ----------
 // Всё читается из ядра/proc без внешних зависимостей; «тяжёлые» вызовы
@@ -735,7 +752,7 @@ async function handleApi(req, res, url) {
     try {
       result = await provider.createPayment(s.payments.creds, order, {
         currencyCode: s.payments.currencyCode,
-        publicUrl: (process.env.PUBLIC_URL || '').replace(/\/$/, ''),
+        publicUrl: tenant.publicUrl,
         returnToken,
       });
     } catch (e) {
@@ -851,7 +868,7 @@ async function handleApi(req, res, url) {
       if (method === 'GET') return json(res, 200, getSettings());
       if (method === 'PUT') {
         let body; try { body = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
-        const next = sanitize(require('./settings').mergeDeep(store.read('settings', {}), body));
+        const next = sanitize(mergeDeep(store.read('settings', {}), body));
         store.write('settings', next);
         return json(res, 200, next);
       }
@@ -1034,8 +1051,8 @@ async function handleApi(req, res, url) {
         }
       }
 
-      add('publicUrl', 'PUBLIC_URL настроен', /^https:\/\//i.test(process.env.PUBLIC_URL || ''),
-        process.env.PUBLIC_URL || 'не задан',
+      add('publicUrl', 'PUBLIC_URL настроен', /^https:\/\//i.test(tenant.publicUrl),
+        tenant.publicUrl || 'не задан',
         'Без https-адреса Telegram не откроет мини-апп и не отдаст фото при публикации в канал');
 
       // Отдельная проверка кнопки «Открыть»: web_app-кнопки и кнопка меню
@@ -1067,7 +1084,7 @@ async function handleApi(req, res, url) {
           'Вкладка «Оплата» → заполните ключи мерчанта');
       }
 
-      return json(res, 200, { checks, apiBase: API_BASE, botMode: process.env.BOT_MODE || 'polling' });
+      return json(res, 200, { checks, apiBase: API_BASE, botMode: tenant.botMode || 'polling' });
     }
 
     if (p === '/api/admin/payment-providers' && method === 'GET') {
@@ -1105,7 +1122,7 @@ async function handleApi(req, res, url) {
       }).slice(0, 1024);
 
       const payload = { chat_id: s.channel.channelId, reply_markup: { inline_keyboard: [[{ text: s.channel.postButtonText, url: link }]] } };
-      const publicBase = (process.env.PUBLIC_URL || '').replace(/\/$/, '');
+      const publicBase = tenant.publicUrl;
       let apiMethod = 'sendMessage';
       if (product.images && product.images[0] && publicBase) {
         apiMethod = 'sendPhoto';
