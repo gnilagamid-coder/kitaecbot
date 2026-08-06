@@ -16,7 +16,13 @@ function createDb({ host, port, user, password, database } = {}) {
     database: database || undefined,
     charset: 'utf8mb4',
     waitForConnections: true,
-    connectionLimit: 5,
+    // Пять соединений хватало на один магазин, но в режиме платформы через
+    // этот же пул ходят все арендаторы разом: каждый запрос витрины, каждое
+    // сохранение настроек, каждый заказ. На полусотне магазинов пул станет
+    // очередью раньше, чем упрётся что-либо ещё. Значение по умолчанию
+    // поднято и вынесено в окружение, чтобы его можно было подогнать под
+    // max_connections самого MySQL, не трогая код.
+    connectionLimit: Number(process.env.MYSQL_POOL_SIZE) || 20,
     // Долгие миграции и массовый импорт заказов не должны рваться на таймауте
     connectTimeout: 10000,
     timezone: '+00:00',

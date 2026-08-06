@@ -355,3 +355,52 @@ test('полный цикл: оплата снимает приостановк�
   const alive = await httpReq({ host: 'cycle.' + DOMAIN, p: '/api/settings' });
   assert.strictEqual(alive.status, 200, 'оплата сняла приостановку сразу');
 });
+
+// ---------- регрессии на исправленное ----------
+
+test('счета не сталкиваются номерами при одновременном выставлении', async t => {
+  if (skipDb(t)) return;
+  const b = makeBilling();
+  const shop = await makeShop('race', 'Гонка');
+
+  // Раньше номер брался как SELECT MAX(inv_id)+1 отдельным запросом: обычный
+  // SELECT в InnoDB ничего не блокирует, и одновременные нажатия «Оплатить»
+  // получали один номер. Второму прилетала ошибка дубликата вместо ссылки.
+  const invoices = await Promise.all(
+    Array.from({ length: 8 }, () => b.createInvoice(shop))
+  );
+
+  const ids = invoices.map(i => i.invId);
+  assert.strictEqual(new Set(ids).size, ids.length, `номера должны быть уникальны, получено: ${ids.join()}`);
+  for (const id of ids) assert.ok(Number.isInteger(id) && id > 0, `битый номер ${id}`);
+});
+
+test('нулевой пробный период не приостанавливает только что созданный магазин', async t => {
+  if (skipDb(t)) return;
+  // BILLING_TRIAL_DAYS=0 — значение по умолчанию. До правки cutoff совпадал
+  // с «сейчас», и enforce() гасил витрину магазина, созданного секунду назад.
+  const b = makeBilling({ trialDays: 0 });
+  const fresh = await makeShop('newborn', 'Только что');
+
+  const list = await b.enforce();
+  assert.ok(!list.some(x => x.subdomain === 'newborn'),
+    'новый магазин не должен приостанавливаться в первый же день');
+
+  // а вчерашний неоплаченный — должен
+  const old = await makeShop('yesterday', 'Вчерашний');
+  await db.query('UPDATE shops SET created_at = NOW() - INTERVAL 3 DAY WHERE id = ?', [old.shop_id]);
+  const list2 = await b.enforce();
+  assert.ok(list2.some(x => x.subdomain === 'yesterday'),
+    'магазин старше суток без оплаты приостанавливается');
+});
+
+test('подпись Robokassa сравнивается без учёта регистра и не ломается на мусоре', () => {
+  const rk = createRobokassa({ login: RK.login, pass1: RK.pass1, pass2: RK.pass2 });
+  const sig = md5(`990.00:77:${RK.pass2}`);
+  assert.ok(rk.verifyResult({ OutSum: '990.00', InvId: '77', SignatureValue: sig.toUpperCase() }));
+  assert.ok(rk.verifyResult({ OutSum: '990.00', InvId: '77', SignatureValue: sig.toLowerCase() }));
+  assert.ok(!rk.verifyResult({ OutSum: '990.00', InvId: '77', SignatureValue: 'подделка' }));
+  // разной длины и пустые значения не должны бросать — только возвращать false
+  assert.ok(!rk.verifyResult({ OutSum: '990.00', InvId: '77', SignatureValue: '' }));
+  assert.ok(!rk.verifyResult({}));
+});

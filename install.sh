@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # Установщик магазина на чистый Debian 11/12 или Ubuntu 22.04/24.04.
+#
+# Основной режим — webhook: Telegram сама приносит обновления на сервер по
+# HTTPS. Бот регистрирует вебхук (setWebhook) при первом старте сервиса —
+# вручную ничего вызывать не нужно. Домен и сертификат для этого обязательны;
+# без домена установщик честно ставит long polling (бот стучится к Telegram сам).
+#
 # Запускать от root:  bash install.sh
 set -euo pipefail
 
 APP_DIR="/opt/tg-shop"
 SERVICE="tg-shop"
-NODE_MAJOR=20
+NODE_MAJOR=24
 
 say()  { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m!  %s\033[0m\n' "$*"; }
@@ -47,7 +53,11 @@ echo
 echo "──────────── Настройка ────────────"
 BOT_TOKEN="$(ask 'Токен бота от @BotFather' "$OLD_BOT_TOKEN")"
 [ -n "$BOT_TOKEN" ] || die "Без токена бот и уведомления работать не будут"
-DOMAIN="$(ask 'Домен (например shop.example.com), пусто = только по IP' "$OLD_DOMAIN")"
+DOMAIN="$(ask 'Домен (например shop.example.com)' "$OLD_DOMAIN")"
+if [ -z "$DOMAIN" ]; then
+  warn "Без домена невозможен HTTPS, а без HTTPS — вебхук: бот будет работать"
+  warn "в режиме long polling. Для продакшена укажите домен и перезапустите установщик."
+fi
 ADMIN_TOKEN="$(ask 'Пароль в админку (Enter — оставить прежний или сгенерировать)' "$OLD_ADMIN_TOKEN")"
 [ -n "$ADMIN_TOKEN" ] || ADMIN_TOKEN="$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 24)"
 PORT="$(ask 'Внутренний порт' "${OLD_PORT:-3000}")"
@@ -63,13 +73,81 @@ mkdir -p "$APP_DIR/data/images"
 id -u tgshop >/dev/null 2>&1 || useradd --system --home "$APP_DIR" --shell /usr/sbin/nologin tgshop
 chown -R tgshop:tgshop "$APP_DIR"
 
-PUBLIC_URL="http://$(hostname -I | awk '{print $1}'):${PORT}"
-[ -n "$DOMAIN" ] && PUBLIC_URL="https://${DOMAIN}"
-
 # Список владельцев для входа в админку из бота. При установке его ещё нет
 # (chat_id узнаётся командой /id у уже запущенного бота) — при повторном
 # запуске просто сохраняем прежнее значение.
 ADMIN_CHAT_IDS="$OLD_ADMIN_CHAT_IDS"
+
+# ---------- nginx + TLS ----------
+# До запуска сервиса: вебхук регистрируется при старте бота, и к этому моменту
+# HTTPS уже должен отвечать. Telegram принимает вебхук только по HTTPS и только
+# на портах 443/80/88/8443 — используем 443.
+TLS_OK=0
+if [ -n "$DOMAIN" ]; then
+  say "Настраиваю nginx для ${DOMAIN}"
+  apt-get install -y -qq nginx >/dev/null
+  cat > "/etc/nginx/sites-available/${SERVICE}" <<EOF
+server {
+    listen 80;
+    server_name ${DOMAIN};
+
+    # админка отдаёт токен в заголовке, а картинки могут быть тяжёлыми
+    client_max_body_size 12m;
+
+    # Вход в админку: страница — лишь форма, но на всякий случай не пишем
+    # этот путь в access-лог (защита от случайных секретов в query-строке).
+    location = /admin.html {
+        access_log off;
+        proxy_pass http://127.0.0.1:${PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    # Всё остальное, включая /api/webhook — сюда Telegram доставляет апдейты бота.
+    location / {
+        proxy_pass http://127.0.0.1:${PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+  ln -sf "/etc/nginx/sites-available/${SERVICE}" "/etc/nginx/sites-enabled/${SERVICE}"
+  rm -f /etc/nginx/sites-enabled/default
+  nginx -t >/dev/null && systemctl reload nginx
+
+  say "Выпускаю сертификат Let's Encrypt"
+  apt-get install -y -qq certbot python3-certbot-nginx >/dev/null
+  if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email --redirect >/dev/null 2>&1; then
+    echo "   сертификат выпущен"
+    TLS_OK=1
+  else
+    warn "Certbot не смог выпустить сертификат. Проверь, что A-запись ${DOMAIN} указывает на этот сервер, и повтори:"
+    warn "   certbot --nginx -d ${DOMAIN}"
+    warn "Без сертификата вебхук не поднять — ставлю long polling; после выпуска"
+    warn "сертификата перезапусти установщик (он подхватит прежние ответы)."
+  fi
+
+  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+    ufw allow 'Nginx Full' >/dev/null || true
+  fi
+fi
+
+# ---------- .env ----------
+# Режим бота. Вебхук включаем только при рабочем HTTPS: с BOT_STRICT_WEBHOOK=1
+# бот не откатывается на опрос, а остаётся выключенным — на продакшене тихий
+# откат хуже явной ошибки.
+BOT_MODE="polling"
+BOT_STRICT_LINE=""
+PUBLIC_URL="http://$(hostname -I | awk '{print $1}'):${PORT}"
+if [ "$TLS_OK" = "1" ]; then
+  BOT_MODE="webhook"
+  BOT_STRICT_LINE="BOT_STRICT_WEBHOOK=1"
+  PUBLIC_URL="https://${DOMAIN}"
+fi
 
 cat > "$APP_DIR/.env" <<EOF
 BOT_TOKEN=${BOT_TOKEN}
@@ -79,6 +157,8 @@ PORT=${PORT}
 HOST=127.0.0.1
 PUBLIC_URL=${PUBLIC_URL}
 DATA_DIR=${APP_DIR}/data
+BOT_MODE=${BOT_MODE}
+${BOT_STRICT_LINE}
 EOF
 chown tgshop:tgshop "$APP_DIR/.env"
 chmod 600 "$APP_DIR/.env"
@@ -115,53 +195,24 @@ systemctl enable --now "$SERVICE" >/dev/null
 sleep 2
 systemctl is-active --quiet "$SERVICE" || { journalctl -u "$SERVICE" -n 30 --no-pager; die "Сервис не поднялся"; }
 
-# ---------- nginx + TLS ----------
-if [ -n "$DOMAIN" ]; then
-  say "Настраиваю nginx для ${DOMAIN}"
-  apt-get install -y -qq nginx >/dev/null
-  cat > "/etc/nginx/sites-available/${SERVICE}" <<EOF
-server {
-    listen 80;
-    server_name ${DOMAIN};
+# ---------- проверка ----------
+say "Проверяю"
+curl -fsS "http://127.0.0.1:${PORT}/" >/dev/null || die "Сервис не отвечает на http://127.0.0.1:${PORT}/"
+echo "   витрина отвечает"
 
-    # админка отдаёт токен в заголовке, а картинки могут быть тяжёлыми
-    client_max_body_size 12m;
-
-    # Вход в админку: страница — лишь форма, но на всякий случай не пишем
-    # этот путь в access-лог (защита от случайных секретов в query-строке).
-    location = /admin.html {
-        access_log off;
-        proxy_pass http://127.0.0.1:${PORT};
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
-    location / {
-        proxy_pass http://127.0.0.1:${PORT};
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
-EOF
-  ln -sf "/etc/nginx/sites-available/${SERVICE}" "/etc/nginx/sites-enabled/${SERVICE}"
-  rm -f /etc/nginx/sites-enabled/default
-  nginx -t >/dev/null && systemctl reload nginx
-
-  say "Выпускаю сертификат Let's Encrypt"
-  apt-get install -y -qq certbot python3-certbot-nginx >/dev/null
-  if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email --redirect >/dev/null 2>&1; then
-    echo "   сертификат выпущен"
+if [ "$BOT_MODE" = "webhook" ]; then
+  # Регистрация вебхука происходит при старте бота (setWebhook на
+  # PUBLIC_URL/api/webhook) — даём ей несколько секунд и смотрим журнал.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    journalctl -u "$SERVICE" -n 60 --no-pager 2>/dev/null | grep -q 'режим: webhook' && break
+    sleep 1
+  done
+  if journalctl -u "$SERVICE" -n 60 --no-pager 2>/dev/null | grep -q 'режим: webhook'; then
+    echo "   вебхук зарегистрирован: Telegram сама доставляет апдейты на ${PUBLIC_URL}/api/webhook"
   else
-    warn "Certbot не смог выпустить сертификат. Проверь, что A-запись ${DOMAIN} указывает на этот сервер, и повтори:"
-    warn "   certbot --nginx -d ${DOMAIN}"
-  fi
-
-  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-    ufw allow 'Nginx Full' >/dev/null || true
+    warn "В журнале не видно регистрации вебхука — смотри: journalctl -u ${SERVICE} -n 30"
+    warn "Частые причины: неверный токен, домен ещё не резолвится наружу,"
+    warn "или api.telegram.org недоступен с этого сервера (нужен TELEGRAM_API_BASE)."
   fi
 fi
 
@@ -169,7 +220,7 @@ fi
 cat <<EOF
 
 ════════════════════════════════════════════════
-  Готово.
+  Готово. Режим бота: ${BOT_MODE}
 
   Витрина:  ${PUBLIC_URL}/
   Админка:  в боте команда /admin (сначала впишите свой chat_id

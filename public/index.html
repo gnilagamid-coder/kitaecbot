@@ -219,6 +219,16 @@
     position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,.72);color:#fff;
     font-family:var(--font-display);font-size:10px;font-weight:600;letter-spacing:.5px;text-transform:var(--caps);text-align:center;padding:5px 0;
   }
+  /* В стеклянной теме плашка во всю ширину с чёрной заливкой и прямыми углами
+     была единственным элементом из старого набора: вокруг скругления 24px и
+     матовые панели, а она — как наклейка из другого макета. Делаем её
+     капсулой в том же языке. */
+  body.glass .stock-badge{
+    left:auto;right:8px;bottom:8px;padding:4px 10px;border-radius:999px;
+    background:rgba(10,12,18,.55);border:1px solid rgba(255,255,255,.18);
+    backdrop-filter:blur(12px) saturate(1.6);-webkit-backdrop-filter:blur(12px) saturate(1.6);
+    letter-spacing:.2px;
+  }
   .card-fav{
     position:absolute;top:4px;right:4px;width:36px;height:36px;
     background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;border-radius:var(--radius);
@@ -1200,6 +1210,18 @@ searchClear.onclick = () => {
 };
 document.getElementById('sortSelect').onchange = e => { sortMode = e.target.value; haptic.sel(); renderGrid(); };
 
+// Счётчик каталога писал «1 товаров» и «22 товаров» — мелочь, которую видно
+// на каждой витрине в первую же секунду. Правило русского счёта: 1 — товар,
+// 2-4 — товара, остальное — товаров, с исключением на 11-14.
+function plural(n){
+  const abs = Math.abs(n) % 100;
+  const last = abs % 10;
+  if(abs > 10 && abs < 20) return `${n} товаров`;
+  if(last === 1) return `${n} товар`;
+  if(last >= 2 && last <= 4) return `${n} товара`;
+  return `${n} товаров`;
+}
+
 function renderSkeletons(){
   document.getElementById('grid').innerHTML = Array.from({length:6}, () =>
     `<div class="skeleton"><div class="sk-img"></div><div class="sk-line"></div><div class="sk-line short"></div></div>`
@@ -1221,11 +1243,19 @@ function renderGrid(){
   const list = getFilteredProducts();
   const visibleTotal = products.filter(p=>!p.hidden).length;
   countEl.textContent = settings?.catalog.showCount
-    ? (list.length === visibleTotal ? `${visibleTotal} товаров` : `${list.length} из ${visibleTotal} товаров`)
+    ? (list.length === visibleTotal ? plural(visibleTotal) : `${list.length} из ${plural(visibleTotal)}`)
     : '';
 
   if(!visibleTotal){
-    grid.innerHTML = `<div class="empty" style="grid-column:1/-1">${esc(settings?.catalog.emptyText || 'Каталог пока пуст.')}</div>`;
+    // Совсем пустой каталог — это почти всегда только что созданный магазин,
+    // и первым его открывает владелец. «Загляните позже» ему бесполезно:
+    // подсказываем, куда идти. Как только появится хоть один товар (пусть
+    // даже скрытый), подсказка исчезает и покупатели её не увидят.
+    const brandNew = products.length === 0;
+    grid.innerHTML = `<div class="empty" style="grid-column:1/-1">${esc(settings?.catalog.emptyText || 'Каталог пока пуст.')}${
+      brandNew ? `<div class="empty-action" id="toAdmin">Добавить первый товар</div>` : ''}</div>`;
+    const toAdmin = document.getElementById('toAdmin');
+    if(toAdmin) toAdmin.onclick = () => { location.href = '/admin.html'; };
     return;
   }
   if(!list.length){

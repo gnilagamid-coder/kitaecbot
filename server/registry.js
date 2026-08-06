@@ -33,23 +33,32 @@ function createRegistry(db) {
   }
 
   async function createShop({
-    tenantId, subdomain, title = '', adminTokenHash,
+    tenantId, subdomain, title = '', adminTokenHash, sessionKey = null,
     botTokenEnc = null, adminChatIds = null, status = 'active',
   }) {
     const [r] = await db.query(
-      `INSERT INTO shops (tenant_id, subdomain, title, bot_token_enc, admin_token_hash, admin_chat_ids, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [tenantId, subdomain, title, botTokenEnc, String(adminTokenHash),
+      `INSERT INTO shops (tenant_id, subdomain, title, bot_token_enc, admin_token_hash, session_key, admin_chat_ids, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [tenantId, subdomain, title, botTokenEnc, String(adminTokenHash), sessionKey,
         adminChatIds ? JSON.stringify(adminChatIds) : null, status]);
     return r.insertId;
+  }
+
+  // Досыпать ключ подписи магазину, заведённому до миграции 0004.
+  // Возвращает true, если ключ действительно поставили.
+  async function setSessionKey(shopId, sessionKey) {
+    const [r] = await db.query(
+      'UPDATE shops SET session_key = ? WHERE id = ? AND session_key IS NULL',
+      [sessionKey, shopId]);
+    return r.affectedRows > 0;
   }
 
   // Строка магазина вместе с арендатором. status не фильтруем: вызывающий
   // сам решает, обслуживать ли provisioning/suspended (см. resolveTenantByHost).
   async function findShopBySubdomain(subdomain) {
     const [rows] = await db.query(
-      `SELECT s.id AS shop_id, s.subdomain, s.title, s.bot_token_enc, s.admin_token_hash,
-              s.admin_chat_ids, s.status, s.created_at, s.tenant_id,
+      `SELECT s.id AS shop_id, s.subdomain, s.title, s.bot_token_enc, s.bot_username,
+              s.admin_token_hash, s.session_key, s.admin_chat_ids, s.status, s.created_at, s.tenant_id,
               t.slug AS tenant_slug, t.name AS tenant_name, t.email AS tenant_email
          FROM shops s JOIN tenants t ON t.id = s.tenant_id
         WHERE s.subdomain = ?`,
@@ -81,8 +90,11 @@ function createRegistry(db) {
     await db.query('UPDATE shops SET status = ? WHERE id = ?', [status, shopId]);
   }
 
-  async function setBotToken(shopId, encBuf) {
-    await db.query('UPDATE shops SET bot_token_enc = ? WHERE id = ?', [encBuf, shopId]);
+  // encBuf === null означает «отключить бота»: чистим и токен, и имя.
+  async function setBotToken(shopId, encBuf, botUsername = null) {
+    await db.query(
+      'UPDATE shops SET bot_token_enc = ?, bot_username = ? WHERE id = ?',
+      [encBuf, botUsername, shopId]);
   }
 
   async function countShops() {
@@ -95,7 +107,7 @@ function createRegistry(db) {
     validateSubdomain,
     createTenant, createShop,
     findShopBySubdomain, listActiveShops, listBootShops,
-    setShopStatus, setBotToken, countShops,
+    setShopStatus, setBotToken, setSessionKey, countShops,
   };
 }
 

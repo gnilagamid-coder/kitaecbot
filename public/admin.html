@@ -420,6 +420,8 @@ let settings = null;
 let products = [];
 let views = {};
 let stats = {};
+// Режим платформы и подключённый бот — приезжают вместе со статистикой.
+let platform = {};
 let orders = [];
 let dirty = false;
 
@@ -764,7 +766,7 @@ function buildPanel(id){
   if(id === 'payments')  return buildPayments();
   if(id === 'promo')     return buildPromo();
   if(id === 'notify')    return buildNotify();
-  if(id === 'bot')       return renderPanel('panel-bot', PANEL_BOT());
+  if(id === 'bot'){ renderPanel('panel-bot', PANEL_BOT()); return buildBotToken(); }
   if(id === 'channel')   return renderPanel('panel-channel', PANEL_CHANNEL());
   if(id === 'advanced')  return buildAdvanced();
 }
@@ -1167,6 +1169,67 @@ function renderPromoList(){
 }
 
 // ---------- Уведомления ----------
+// Подключение бота к магазину. В режиме платформы токен живёт в базе
+// зашифрованным, и другого способа его задать у продавца нет: SSH и .env
+// ему недоступны. Форма показывается только там, где это применимо —
+// в одиночной установке токен по-прежнему в .env.
+function buildBotToken(){
+  const panel = $('panel-bot');
+  if(!panel || !platform || !platform.multitenant) return;
+
+  const card = document.createElement('div');
+  card.className = 'card';
+  const has = !!(platform.botUsername);
+  card.innerHTML = `
+    <h2>Подключение бота</h2>
+    <div class="hint">
+      Создайте бота у <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a>
+      командой <code>/newbot</code> и вставьте выданный токен сюда. Магазин подхватит его сразу,
+      перезапускать ничего не нужно.
+    </div>
+    <div class="field">
+      <label>Токен бота</label>
+      <input type="password" id="botTokenInput" autocomplete="off"
+             placeholder="${has ? 'бот подключён — вставьте новый токен, чтобы заменить' : '123456789:AA...'}">
+      <div class="sub" id="botTokenState">${has
+        ? `Сейчас подключён <b>@${esc(platform.botUsername)}</b>`
+        : 'Бот не подключён — витрина работает, но заказы в Telegram не приходят'}</div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button type="button" id="botTokenSave" style="flex:1">Подключить</button>
+      ${has ? '<button type="button" class="ghost" id="botTokenClear">Отключить бота</button>' : ''}
+    </div>`;
+  panel.insertBefore(card, panel.firstChild);
+
+  const save = async token => {
+    const btn = $('botTokenSave');
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = 'Проверяю…';
+    try{
+      const r = await api('/api/admin/bot-token', { method:'PUT', body: JSON.stringify({ token }) });
+      platform.botUsername = r.username || '';
+      toast(r.username ? `Бот @${r.username} подключён` : 'Бот отключён');
+      buildPanel('bot');
+    }catch(e){
+      toast(e.message, true);
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  };
+
+  $('botTokenSave').onclick = () => {
+    const v = $('botTokenInput').value.trim();
+    if(!v){ toast('Вставьте токен от @BotFather', true); return; }
+    save(v);
+  };
+  const clear = $('botTokenClear');
+  if(clear) clear.onclick = async () => {
+    if(!await confirmDialog('Отключить бота? Заказы перестанут приходить в Telegram, магазин продолжит работать.', 'Отключить')) return;
+    save('');
+  };
+}
+
 function buildNotify(){
   $('panel-notify').innerHTML = `
     ${renderCard({ title:'Отстук менеджеру', hint:
@@ -2112,6 +2175,7 @@ async function init(){
   }
   try{ views = await api('/api/admin/views'); }catch(e){ views = {}; }
   try{ stats = await api('/api/admin/stats'); }catch(e){ stats = {}; }
+  platform = stats.platform || {};
 
   $('loginBox').style.display = 'none';
   $('wrap').classList.add('open');

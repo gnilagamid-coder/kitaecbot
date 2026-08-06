@@ -12,3 +12,11 @@ debug-token.ps1
 # Профиль браузера от рендера слайдов: кэш, куки, токены. В репозиторий
 # такое попадать не должно ни при каких условиях.
 design/.tmp-slides/
+
+# Рабочие артефакты дизайна и локальные папки — не часть проекта.
+design/avito-slides.html
+design/fonts/
+design/fonts-local.css
+design/*.ps1
+.claude/
+avito/
