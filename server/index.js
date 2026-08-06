@@ -26,7 +26,6 @@ const { execFile } = require('node:child_process');
 const authguard = require('./authguard');
 const { createTenant } = require('./tenant');
 const { createBackupManager } = require('./backup');
-const { createAccounts } = require('./accounts');
 const { sanitize, mergeDeep } = require('./settings');
 const { esc } = require('./telegram');
 const payments = require('./payments');
@@ -136,9 +135,6 @@ function rateLimit(ip, max, windowMs) {
 setInterval(() => { const now = Date.now(); for (const [k, v] of hits) if (now - v.start > 600000) hits.delete(k); }, 600000).unref();
 
 const getSettings = () => tenant.settings();
-
-// Личный кабинет покупателя: выпуск и проверка токенов входа (см. accounts.js)
-const accounts = createAccounts({ getSettings, adminSecret: ADMIN_TOKEN });
 
 // ---------- состояние VPS (карточка «Сервер» в админке) ----------
 // Всё читается из ядра/proc без внешних зависимостей; «тяжёлые» вызовы
@@ -272,13 +268,10 @@ function settingsFingerprint() {
 // На витрину не отдаём то, что клиенту знать незачем. Особенно creds платёжного
 // мерчанта: /api/settings открыт всем без авторизации, и утечь секрет там нельзя.
 function publicSettings(s) {
-  const { notify, payments, promo, account, ...rest } = s;
+  const { notify, payments, promo, ...rest } = s;
   return {
     ...rest,
     notifyEnabled: notify.enabled,
-    // Витрине нужен только факт «вход включён» — сам логин выдаёт продавец,
-    // а хэш пароля не должен покидать сервер в принципе.
-    account: { enabled: account.enabled },
     // Сами коды наружу не отдаём — иначе их можно было бы просто прочитать
     // в /api/settings и раздать. Клиент только знает, что поле надо показать,
     // а проверка кода идёт отдельным запросом на сервер.
@@ -513,44 +506,6 @@ async function handleApi(req, res, url) {
     return json(res, 200, publicSettings(getSettings()));
   }
 
-  // ===== личный кабинет покупателя =====
-  // Вход опционален: витрина и гостевые заказы от него не зависят.
-  // Подбор пароля тормозит authguard — та же схема, что у админки, но со
-  // своей кассой попыток ('shop:'+ip), чтобы не запереть админа.
-  if (p === '/api/shop/login' && method === 'POST') {
-    let body; try { body = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
-    const r = accounts.loginAttempt(body.login, body.password, ip);
-    if (r.locked) {
-      const sec = Math.ceil(r.retryAfterMs / 1000);
-      res.setHeader('Retry-After', String(sec));
-      return json(res, 429, { error: `Слишком много попыток входа. Подождите ${sec} с.` });
-    }
-    if (!r.ok) return json(res, 401, { error: r.error });
-    return json(res, 200, { ok: true, token: r.token, login: r.login });
-  }
-
-  // Жив ли токен из localStorage витрины — проверяем при открытии приложения
-  if (p === '/api/account/check' && method === 'GET') {
-    const acc = accounts.check(String(req.headers['x-shop-token'] || ''));
-    if (!acc) return json(res, 401, { error: 'unauthorized' });
-    return json(res, 200, { ok: true, login: acc.login });
-  }
-
-  // История заказов кабинета: только заказы, оформленные под этим логином
-  if (p === '/api/account/orders' && method === 'GET') {
-    const acc = accounts.check(String(req.headers['x-shop-token'] || ''));
-    if (!acc) return json(res, 401, { error: 'unauthorized' });
-    const orders = ordersRepo.all()
-      .filter(o => o.accountId === acc.login)
-      .sort((a, z) => z.id - a.id)
-      .slice(0, 50)
-      .map(o => ({
-        id: o.id, at: o.at, total: o.total, status: o.status, paid: !!o.paid,
-        items: (o.items || []).map(i => ({ name: i.name, qty: i.qty, price: i.price })),
-      }));
-    return json(res, 200, { orders, statuses: ordersRepo.STATUS_LABELS });
-  }
-
   if (p === '/api/products' && method === 'GET') {
     const s = getSettings();
     // Скрытые товары не отдаём вообще. Раньше их прятала только витрина, а сам
@@ -657,9 +612,6 @@ async function handleApi(req, res, url) {
     // initData прислали, но подпись не сошлась — это подделка, а не «открыли в браузере».
     // Пустой initData по-прежнему значит «вне Telegram» и помечается гостем.
     if (!tgUser && body.initData) return json(res, 403, { error: 'invalid initData' });
-    // Токен личного кабинета — по желанию: гость заказывает как раньше, а
-    // валидный токен привязывает заказ к аккаунту для истории.
-    const shopAcc = accounts.check(accounts.tokenOf(req, body));
     const products = store.read('products', []);
 
     const items = (body.items || []).map(i => {
@@ -712,14 +664,12 @@ async function handleApi(req, res, url) {
     const built = buildOrderText(s, items, c, tgUser, promo, finalTotal);
     let text = built.text;
     if (!tgUser) text += '\n\n⚠️ <i>Заказ оформлен вне Telegram — личность не подтверждена</i>';
-    if (shopAcc) text += `\n\n👤 <b>Личный кабинет:</b> ${esc(shopAcc.login)}`;
 
     const order = {
       id: Date.now(),
       at: new Date().toISOString(),
       items, total: finalTotal, subtotal: total, promo, customer: c,
       user: tgUser ? { id: tgUser.id, username: tgUser.username || '', name: tgUser.first_name || '' } : null,
-      accountId: shopAcc ? shopAcc.login : null,
       status: 'new',
     };
     if (promo) consumePromo(promo.code);
@@ -925,43 +875,12 @@ async function handleApi(req, res, url) {
     authguard.succeed(ip);
 
     if (p === '/api/admin/settings') {
-      if (method === 'GET') {
-        const s = getSettings();
-        // Хэш пароля админке ни к чему — для карточки входа есть отдельный
-        // /api/admin/account, а здесь пустая строка вместо хэша.
-        return json(res, 200, { ...s, account: { ...s.account, passwordHash: '' } });
-      }
+      if (method === 'GET') return json(res, 200, getSettings());
       if (method === 'PUT') {
         let body; try { body = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
-        // Пароль меняется только через /api/admin/account: через общие
-        // настройки его нельзя ни затереть (пустой хэш из GET), ни подменить.
-        if (body.account) { delete body.account.passwordHash; delete body.account.password; }
         const next = sanitize(mergeDeep(store.read('settings', {}), body));
         store.write('settings', next);
-        return json(res, 200, { ...next, account: { ...next.account, passwordHash: '' } });
-      }
-    }
-
-    // Логин/пароль личного кабинета покупателя. Пароль наружу не возвращается
-    // вообще — только факт его наличия.
-    if (p === '/api/admin/account') {
-      const s = getSettings();
-      const view = x => ({ enabled: x.enabled, login: x.login, hasPassword: !!x.passwordHash });
-      if (method === 'GET') return json(res, 200, view(s.account));
-      if (method === 'PUT') {
-        let b; try { b = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
-        const login = String(b.login === undefined ? s.account.login : b.login).trim().slice(0, 40);
-        const enabled = b.enabled === undefined ? s.account.enabled : !!b.enabled;
-        if (b.password && String(b.password).length < 4) return json(res, 400, { error: 'Пароль слишком короткий (минимум 4 символа)' });
-        const passwordHash = b.password ? accounts.hashPassword(String(b.password)) : s.account.passwordHash;
-        if (enabled && (!login || !passwordHash)) {
-          return json(res, 400, { error: 'Для включения входа задайте логин и пароль' });
-        }
-        const next = sanitize(mergeDeep(store.read('settings', {}), { account: { enabled, login, passwordHash } }));
-        store.write('settings', next);
-        // Смена пароля сама инвалидирует старые токены: они подписаны ключом,
-        // в который входит хэш (см. accounts.js).
-        return json(res, 200, view(next.account));
+        return json(res, 200, next);
       }
     }
 

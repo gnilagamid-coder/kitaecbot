@@ -154,16 +154,6 @@ const DEFAULTS = {
     avatarHint: 'caret',
   },
 
-  // --- вход в магазин (личный кабинет покупателя) ---
-  // Опциональная вещь: продавец включает в админке, если хочет дать постоянным
-  // клиентам историю заказов. Выключенный вход ничего не меняет — покупки
-  // гостями работают как раньше.
-  account: {
-    enabled: false,
-    login: '',              // общий логин магазина
-    passwordHash: '',       // sha256(password) hex; сам пароль нигде не храним
-  },
-
   // --- прочее ---
   advanced: {
     locale: 'ru-RU',
@@ -210,7 +200,6 @@ function sanitize(input) {
   const b = s.brand, t = s.theme, c = s.catalog, m = s.commerce;
   const mg = s.manager, ch = s.checkout, n = s.notify, cn = s.channel, bt = s.bot, pr = s.profile, ad = s.advanced;
   const pay = s.payments || {};
-  const acc = s.account || {};
 
   const out = {
     version: 2,
@@ -352,13 +341,6 @@ function sanitize(input) {
       showFavorites: bool(pr.showFavorites, true),
       aboutText: str(pr.aboutText, '', 500),
       avatarHint: oneOf(pr.avatarHint, ['caret', 'dot', 'label', 'none'], 'caret'),
-    },
-    account: {
-      enabled: bool(acc.enabled),
-      login: str(acc.login, '', 40).trim(),
-      // хэш принимаем только в своём же формате: чтобы из импорта или правки
-      // файла в сравнение не попало мусора
-      passwordHash: /^[0-9a-f]{64}$/.test(String(acc.passwordHash || '')) ? String(acc.passwordHash) : '',
     },
     advanced: {
       locale: str(ad.locale, 'ru-RU', 12),
