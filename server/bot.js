@@ -11,6 +11,7 @@
 
 const crypto = require('node:crypto');
 const { esc } = require('./telegram');
+const { createShopBot, SHOP_COMMANDS } = require('./shopbot');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -135,8 +136,22 @@ function createBot(t) {
     return retry;
   }
 
+  // Магазин прямо в чате: каталог, корзина и оформление на кнопках. Живёт
+  // отдельным модулем, а отсюда получает то, что уже умеет этот файл.
+  const shop = createShopBot(t, { notifyManagers, shopWebAppUrl, normalize, fill });
+
+  // Кнопочный магазин включается настройкой bot.classicMenu и работает только
+  // в личке: в группах обычная клавиатура и пошаговая форма мешали бы всем.
+  const classicFor = (s, chat) =>
+    Boolean(s.bot.classicMenu) && (chat.type ? chat.type === 'private' : Number(chat.id) > 0);
+
   async function handleUpdate(update) {
-    if (update.callback_query) return handleCallback(update.callback_query);
+    if (update.callback_query) {
+      if (shop.ownsCallback(update.callback_query)) return shop.handleCallback(update.callback_query);
+      return handleCallback(update.callback_query);
+    }
+    // Правка старого сообщения — не новая реплика: в режиме магазина её
+    // нельзя принимать за ответ на шаг оформления.
     const msg = update.message || update.edited_message;
     if (!msg || !msg.chat) return;
 
@@ -157,6 +172,8 @@ function createBot(t) {
         await notifyManagers(s, `👤 Новый пользователь бота: ${name} ${who}`);
       }
     }
+
+    if (classicFor(s, msg.chat) && update.message && await shop.handleMessage(msg, { name })) return;
 
     if (text === '/start' || text.startsWith('/start ')) {
       // подписка на анонсы строго опциональна: в приветствии показываем кнопку
@@ -413,7 +430,7 @@ function createBot(t) {
       console.error(`${tag} не удалось авторизоваться:`, me.description);
       return;
     }
-    await tgApi('setMyCommands', { commands: COMMANDS });
+    await syncCommands();
 
     // Кнопка меню слева от поля ввода — её же видно в превью чата. Без этого
     // вызова у бота стоит type=default («Open»/список команд), а если продавец
@@ -499,12 +516,22 @@ function createBot(t) {
     else console.warn(`${tag} не удалось снять вебхук:`, res && res.description);
   }
 
+  // Список команд в меню «/» зависит от того, включён ли магазин в чате.
+  // Зовётся на старте и после сохранения настроек в админке — без
+  // перезапуска сервиса.
+  async function syncCommands() {
+    if (!BOT_TOKEN) return;
+    const commands = settings().bot.classicMenu ? SHOP_COMMANDS : COMMANDS;
+    const res = await tgApi('setMyCommands', { commands });
+    if (!res.ok) console.warn(`${tag} setMyCommands не удался:`, res.description);
+  }
+
   const currentMode = () => mode;
 
   return {
     start, stop, notifyManagers, sendToSubscribers, fill, normalize,
     handleUpdate, webhookSecret, shopWebAppUrl, sendWithFallback, menuButtonText,
-    currentMode,
+    currentMode, syncCommands,
   };
 }
 

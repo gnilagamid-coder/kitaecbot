@@ -25,6 +25,8 @@ const { encryptSecret } = require('./secrets');
 // присланный продавцом токен до того, как он попадёт в базу.
 const createTenantTelegram = token => createTelegram({ botToken: token, apiBase: process.env.TELEGRAM_API_BASE });
 const payments = require('./payments');
+// Правила оформления заказа — общие для мини-аппа и кнопочного бота в чате
+const { money, applyPromo, placeOrder, createPaymentLink } = require('./checkout');
 const { resolveTheme, onAccentColor } = require('../public/theme-core.js');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -356,49 +358,6 @@ function publicSettings(s) {
   };
 }
 
-// Проверка промокода и расчёт скидки. Живёт на сервере и вызывается ДВАЖДЫ:
-// при вводе кода покупателем (показать сумму) и при оформлении заказа (посчитать
-// по-настоящему). Клиенту доверять нельзя — он мог бы прислать любую скидку.
-function applyPromo(s, rawCode, total) {
-  const code = String(rawCode || '').trim().toUpperCase();
-  if (!code) return { ok: false, error: 'Введите промокод' };
-  if (!s.promo.enabled) return { ok: false, error: 'Промокоды сейчас не принимаются' };
-
-  const p = s.promo.codes.find(c => c.code === code);
-  // Один и тот же ответ на «нет такого» и «выключен» — иначе перебором можно
-  // выяснить, какие коды вообще существуют.
-  if (!p || !p.active) return { ok: false, error: 'Промокод не найден' };
-  if (p.usesLeft !== null && p.usesLeft <= 0) return { ok: false, error: 'Промокод уже использован' };
-  if (p.minTotal && total < p.minTotal) {
-    return { ok: false, error: `Промокод действует от ${money(p.minTotal, s)}` };
-  }
-
-  const raw = p.type === 'percent' ? Math.round(total * p.value / 100) : p.value;
-  const discount = Math.max(0, Math.min(raw, total)); // скидка не больше суммы заказа
-  return {
-    ok: true, code: p.code, discount,
-    total: total - discount,
-    label: p.type === 'percent' ? `−${p.value}%` : `−${money(p.value, s)}`,
-  };
-}
-
-// Списываем одно применение кода. Отдельно от расчёта: проверять можно сколько
-// угодно раз, а тратить — только при реальном заказе.
-function consumePromo(code) {
-  const raw = store.read('settings', {});
-  const list = (raw.promo && raw.promo.codes) || [];
-  const p = list.find(c => String(c.code || '').toUpperCase() === code);
-  if (!p) return;
-  p.used = (p.used || 0) + 1;
-  if (p.usesLeft !== null && p.usesLeft !== undefined) p.usesLeft = Math.max(0, p.usesLeft - 1);
-  store.write('settings', raw);
-}
-
-const money = (n, s) => {
-  const v = Number(n).toLocaleString(s.advanced.locale || 'ru-RU');
-  return s.commerce.currencyPosition === 'before' ? `${s.commerce.currency}${v}` : `${v} ${s.commerce.currency}`;
-};
-
 // Анонс подписчикам бота: новинка или смена цены. Стреляем fire-and-forget —
 // ответ админке не должен зависеть от скорости рассылки по сотням чатов,
 // а сбой доставки не должен ломать сохранение товара.
@@ -541,36 +500,6 @@ async function serveStatic(req, res, urlPath) {
   }
 }
 
-// ---------- заказы ----------
-function buildOrderText(s, items, c, tgUser, promo, finalTotal) {
-  const subtotal = items.reduce((sum, i) => sum + i.price * i.qty, 0);
-  const total = finalTotal === undefined ? subtotal : finalTotal;
-  const L = [];
-  L.push('🛒 <b>Новый заказ</b>');
-  L.push('');
-  L.push(`👤 Клиент: ${esc(c.name || (tgUser && tgUser.first_name) || 'Без имени')}`);
-  if (c.phone) L.push(`📱 Телефон: ${esc(c.phone)}`);
-  if (c.email) L.push(`✉️ Email: ${esc(c.email)}`);
-  if (c.address) L.push(`📍 Адрес: ${esc(c.address)}`);
-  if (c.delivery) L.push(`🚚 Доставка: ${esc(c.delivery)}`);
-  if (c.payment) L.push(`💳 Оплата: ${esc(c.payment)}`);
-  if (c.comment) L.push(`📝 Комментарий: ${esc(c.comment)}`);
-  L.push('');
-  L.push('📦 <b>Товары:</b>');
-  items.forEach(i => L.push(`• ${esc(i.name)} × ${i.qty} = ${money(i.price * i.qty, s)}`));
-  L.push('');
-  if (promo) {
-    L.push(`Сумма: ${money(subtotal, s)}`);
-    L.push(`🏷 Промокод <code>${esc(promo.code)}</code> (${esc(promo.label)}): −${money(promo.discount, s)}`);
-  }
-  L.push(`💰 <b>Итого: ${money(total, s)}</b>`);
-  L.push(`🕒 ${new Date().toLocaleString(s.advanced.locale, { timeZone: s.advanced.timezone })}`);
-  if (s.notify.includeCustomerLink && tgUser) {
-    L.push(tgUser.username ? `💬 <a href="https://t.me/${esc(tgUser.username)}">@${esc(tgUser.username)}</a>` : `💬 id: <code>${tgUser.id}</code>`);
-  }
-  return { text: L.join('\n'), total };
-}
-
 // ---------- API ----------
 async function handleApi(req, res, url) {
   const p = url.pathname;
@@ -695,81 +624,16 @@ async function handleApi(req, res, url) {
     // initData прислали, но подпись не сошлась — это подделка, а не «открыли в браузере».
     // Пустой initData по-прежнему значит «вне Telegram» и помечается гостем.
     if (!tgUser && body.initData) return json(res, 403, { error: 'invalid initData' });
-    const products = store.read('products', []);
 
-    const items = (body.items || []).map(i => {
-      // hidden — товар снят с витрины: заказать его нельзя даже по прямой ссылке
-      const prod = products.find(x => x.id === Number(i.id) && !x.hidden);
-      if (!prod) return null;
-      const qty = Math.max(1, Math.min(999, Number(i.qty) || 1));
-      return { id: prod.id, name: prod.name, price: Number(prod.price) || 0, qty };
-    }).filter(Boolean);
+    // Остатки, минимальная сумма, промокод, обязательный телефон, сохранение
+    // и уведомление менеджеру — в checkout.js: по тем же правилам оформляет
+    // заказы и кнопочный магазин в чате бота.
+    const placed = await placeOrder(currentTenant(), {
+      items: body.items, customer: body.customer, tgUser, promoCode: body.promoCode,
+    });
+    if (!placed.ok) return json(res, placed.status, { error: placed.error });
+    const { order, finalTotal } = placed;
 
-    if (!items.length) return json(res, 400, { error: 'корзина пуста' });
-
-    // Остатки проверяет сервер, а не только витрина. Витрина не даёт положить в
-    // корзину больше, чем есть, но прямой запрос это обходил: заказ на
-    // раскупленный товар принимался, а остаток гасился в ноль через Math.max —
-    // продавец получал заказ на то, чего нет.
-    for (const i of items) {
-      const prod = products.find(x => x.id === i.id);
-      if (!prod || typeof prod.stock !== 'number' || prod.stock >= i.qty) continue;
-      return json(res, 400, {
-        error: prod.stock === 0
-          ? `«${prod.name}» раскуплен`
-          : `«${prod.name}»: осталось ${prod.stock} шт.`,
-      });
-    }
-
-    const total = items.reduce((sum, i) => sum + i.price * i.qty, 0);
-    if (s.commerce.minOrder && total < s.commerce.minOrder) {
-      return json(res, 400, { error: `Минимальный заказ — ${money(s.commerce.minOrder, s)}` });
-    }
-
-    // Промокод пересчитываем здесь заново, а не берём скидку из запроса:
-    // клиент мог бы прислать любую сумму. Если код за это время кончился —
-    // заказ всё равно проходит, просто без скидки, и это видно в уведомлении.
-    let promo = null;
-    if (body.promoCode) {
-      const r = applyPromo(s, body.promoCode, total);
-      if (r.ok) promo = { code: r.code, discount: r.discount, label: r.label };
-    }
-    const finalTotal = total - (promo ? promo.discount : 0);
-
-    const c = body.customer || {};
-    // Обязательный телефон проверяем и здесь: на витрине это валидация формы,
-    // а сервер принимал заказ без контакта, до которого потом не дозвониться.
-    // Порог в 10 цифр — тот же, что в форме, чтобы правила не разъезжались.
-    if (s.checkout.askPhone && s.checkout.phoneRequired &&
-        String(c.phone || '').replace(/\D/g, '').length < 10) {
-      return json(res, 400, { error: 'Укажите телефон' });
-    }
-    const built = buildOrderText(s, items, c, tgUser, promo, finalTotal);
-    let text = built.text;
-    if (!tgUser) text += '\n\n⚠️ <i>Заказ оформлен вне Telegram — личность не подтверждена</i>';
-
-    const order = {
-      id: Date.now(),
-      at: new Date().toISOString(),
-      items, total: finalTotal, subtotal: total, promo, customer: c,
-      user: tgUser ? { id: tgUser.id, username: tgUser.username || '', name: tgUser.first_name || '' } : null,
-      status: 'new',
-    };
-    if (promo) consumePromo(promo.code);
-    ordersRepo.add(order);
-
-    // списываем остатки, если они заданы
-    let changed = false;
-    for (const i of items) {
-      const prod = products.find(x => x.id === i.id);
-      if (prod && typeof prod.stock === 'number') { prod.stock = Math.max(0, prod.stock - i.qty); changed = true; }
-    }
-    if (changed) store.write('products', products);
-
-    if (s.notify.enabled && s.notify.onOrder) {
-      // Ошибки доставки логирует сам notifyManagers ([notify] ...)
-      await bot.notifyManagers(s, text).catch(e => console.error('[checkout] notifyManagers:', e.message));
-    }
     // копия покупателю в чат с ботом
     if (s.bot.notifyCustomer && tgUser) {
       // Покупателю — только подтверждение и статус: переменную {order}
@@ -815,7 +679,7 @@ async function handleApi(req, res, url) {
 
     // total — пересчитанная сервером сумма (с промокодом): экран успеха
     // показывает именно её, а не сумму, насчитанную клиентом.
-    return json(res, 200, { ok: true, orderId: order.id, total: finalTotal, orderText: built.text.replace(/<[^>]+>/g, '') });
+    return json(res, 200, { ok: true, orderId: order.id, total: finalTotal, orderText: placed.text.replace(/<[^>]+>/g, '') });
   }
 
   // Создание платежа по уже оформленному заказу. Сумму берём из сохранённого
@@ -824,41 +688,10 @@ async function handleApi(req, res, url) {
     if (!rateLimit(ip, 10, 60000)) return json(res, 429, { error: 'слишком много запросов' });
     let body; try { body = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
 
-    const s = getSettings();
-    if (!s.payments.enabled) return json(res, 400, { error: 'онлайн-оплата выключена' });
-
-    const order = ordersRepo.find(body.orderId);
-    if (!order) return json(res, 404, { error: 'заказ не найден' });
-    if (order.paid) return json(res, 400, { error: 'заказ уже оплачен' });
-
-    const provider = payments.getProvider(s.payments.provider);
-    if (!provider) return json(res, 400, { error: 'платёжный провайдер не настроен' });
-
-    // Одноразовый ключ на возврат из платёжного сервиса. Мерчант приводит
-    // покупателя обратно на PUBLIC_URL/?paid=<id>&t=<ключ>, и витрина по нему
-    // спрашивает у нас настоящий статус. Без ключа адрес был бы оракулом:
-    // номера заказов — это Date.now(), их легко перебрать и узнать, кто и что
-    // оплатил. Ключ живёт в самом заказе и наружу больше нигде не появляется.
-    const returnToken = order.returnToken || crypto.randomBytes(16).toString('hex');
-
-    let result;
-    try {
-      result = await provider.createPayment(s.payments.creds, order, {
-        currencyCode: s.payments.currencyCode,
-        publicUrl: currentTenant().publicUrl,
-        returnToken,
-      });
-    } catch (e) {
-      console.error('[pay] createPayment failed:', e.message);
-      return json(res, 502, { error: 'платёжный сервис недоступен, попробуйте позже' });
-    }
-    if (!result.ok) return json(res, 502, { error: result.error || 'не удалось создать платёж' });
-
-    ordersRepo.update(order.id, {
-      returnToken,
-      payment: { provider: s.payments.provider, externalId: result.externalId, at: new Date().toISOString() },
-    });
-    return json(res, 200, { ok: true, url: result.url, manual: !!result.manual });
+    // Сумма, провайдер и ключ возврата — в checkout.js (оттуда же платит чат-бот)
+    const r = await createPaymentLink(currentTenant(), body.orderId);
+    if (!r.ok) return json(res, r.status, { error: r.error });
+    return json(res, 200, { ok: true, url: r.url, manual: r.manual });
   }
 
   // Статус оплаты для экрана возврата. Раньше витрина верила адресной строке:
@@ -985,8 +818,14 @@ async function handleApi(req, res, url) {
       if (method === 'GET') return json(res, 200, getSettings());
       if (method === 'PUT') {
         let body; try { body = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
+        const prev = getSettings();
         const next = sanitize(mergeDeep(store.read('settings', {}), body));
         store.write('settings', next);
+        // Включили или выключили магазин в чате — меню «/» у покупателей
+        // обновляется сразу, без перезапуска сервиса.
+        if (prev.bot.classicMenu !== next.bot.classicMenu) {
+          bot.syncCommands().catch(e => console.error('[bot] syncCommands:', e.message));
+        }
         return json(res, 200, next);
       }
     }

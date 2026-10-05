@@ -142,6 +142,9 @@ const DEFAULTS = {
     welcomeText: 'Привет, {name}! 👋\nОткрой каталог кнопкой ниже.',
     buttonText: '🛍 Открыть магазин',
     helpText: 'Нажми кнопку ниже, чтобы открыть каталог. По вопросам — /support',
+    // Магазин прямо в чате: меню-клавиатура, карточки с фото, корзина и
+    // оформление по шагам — для тех, кому мини-апп непривычен.
+    classicMenu: true,
     notifyCustomer: true,   // присылать покупателю подтверждение в чат
     // Покупателю — только статус и следующий шаг: номер, сумма и срок связи.
     // Служебная выгрузка заказа («Клиент/Телефон/Товары») остаётся у менеджера.
@@ -336,6 +339,7 @@ function sanitize(input) {
       welcomeText: str(bt.welcomeText, DEFAULTS.bot.welcomeText, 800),
       buttonText: str(bt.buttonText, DEFAULTS.bot.buttonText, 40),
       helpText: str(bt.helpText, DEFAULTS.bot.helpText, 800),
+      classicMenu: bool(bt.classicMenu, true),
       notifyCustomer: bool(bt.notifyCustomer, true),
       customerReceiptText: str(bt.customerReceiptText, DEFAULTS.bot.customerReceiptText, 800),
     },

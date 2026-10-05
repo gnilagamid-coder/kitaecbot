@@ -8,6 +8,8 @@
 
 const crypto = require('node:crypto');
 const dns = require('node:dns');
+const fsp = require('node:fs/promises');
+const path = require('node:path');
 
 // Node 18+ по умолчанию ходит «Happy Eyeballs» и может предпочесть IPv6.
 // Если у VPS есть IPv6-адрес, но он никуда не маршрутизируется (типовая история
@@ -78,6 +80,47 @@ function createTelegram({ botToken = '', apiBase = '' } = {}) {
     return { ok: false, description: `Нет связи с ${API_BASE}: ${message}`, network: true, code };
   }
 
+  // Запрос с файлами (multipart/form-data): фото товара уходит в Telegram
+  // прямо с диска. Ссылкой на /api/image отдать нельзя: у магазина на long
+  // polling может вообще не быть публичного домена, а webp по URL Telegram
+  // принимает через раз.
+  // fields — обычные поля (объекты уходят JSON-строкой), files — { поле: путь }.
+  //
+  // Тело собираем вручную, а не через встроенный FormData: по спецификации он
+  // переводит \n в \r\n во всех текстовых полях, и подпись к фото приезжала бы
+  // в Telegram с лишними \r.
+  async function tgUpload(method, fields, files, opts = {}) {
+    if (!BOT_TOKEN) return { ok: false, description: 'BOT_TOKEN не задан' };
+    const boundary = `----tgshop${crypto.randomBytes(12).toString('hex')}`;
+    const parts = [];
+    const head = (name, extra = '') =>
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"${extra}\r\n`, 'utf8');
+    for (const [k, v] of Object.entries(fields || {})) {
+      if (v === undefined || v === null) continue;
+      const value = typeof v === 'object' ? JSON.stringify(v) : String(v);
+      parts.push(head(k), Buffer.from(`\r\n${value}\r\n`, 'utf8'));
+    }
+    try {
+      for (const [k, file] of Object.entries(files || {})) {
+        const buf = await fsp.readFile(file);
+        const type = UPLOAD_MIME[path.extname(file).toLowerCase()] || 'application/octet-stream';
+        const name = path.basename(file).replace(/["\r\n]/g, '_');
+        parts.push(head(k, `; filename="${name}"`), Buffer.from(`Content-Type: ${type}\r\n\r\n`), buf, Buffer.from('\r\n'));
+      }
+      parts.push(Buffer.from(`--${boundary}--\r\n`));
+      const res = await fetch(`${API_BASE}/bot${BOT_TOKEN}/${method}`, {
+        method: 'POST',
+        headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+        body: Buffer.concat(parts),
+        signal: AbortSignal.timeout(opts.timeoutMs || 60000),
+      });
+      return await res.json();
+    } catch (e) {
+      const { code, message } = explainNetworkError(e);
+      return { ok: false, description: `Загрузка в ${API_BASE} не удалась: ${message}`, network: true, code };
+    }
+  }
+
   // Подпись initData — единственный способ доказать, что запрос действительно
   // пришёл из Telegram от конкретного пользователя, а не подделан из curl.
   function validateInitData(initData) {
@@ -108,7 +151,9 @@ function createTelegram({ botToken = '', apiBase = '' } = {}) {
     try { return JSON.parse(params.get('user')); } catch (e) { return null; }
   }
 
-  return { BOT_TOKEN, API_BASE, tgApi, validateInitData };
+  return { BOT_TOKEN, API_BASE, tgApi, tgUpload, validateInitData };
 }
+
+const UPLOAD_MIME = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif' };
 
 module.exports = { createTelegram, esc, explainNetworkError, DEFAULT_API_BASE };
