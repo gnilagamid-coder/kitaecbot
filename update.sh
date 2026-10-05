@@ -74,7 +74,9 @@ PREV_COMMIT=""
 if [ -d "$SRC_DIR/.git" ]; then
   say "Забираю обновления из git"
   PREV_COMMIT="$(git -C "$SRC_DIR" rev-parse --short HEAD)"
-  git -C "$SRC_DIR" fetch --all --quiet
+  # только origin: прочие remote (форки, зеркала) могут требовать логин, и
+  # fetch --all ронял бы всё обновление ещё до первого магазина
+  git -C "$SRC_DIR" fetch --quiet origin
   BRANCH="$(git -C "$SRC_DIR" rev-parse --abbrev-ref HEAD)"
   # локальные правки не даём потерять молча
   if ! git -C "$SRC_DIR" diff --quiet || ! git -C "$SRC_DIR" diff --cached --quiet; then
