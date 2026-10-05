@@ -218,6 +218,54 @@
      пересчитывается в fitPreview(). */
   .phone iframe{width:390px;height:844px;border:0;display:block;transform-origin:0 0}
 
+  /* ---------- вкладка «Чат-бот» ---------- */
+  .cb-layout{display:flex;flex-direction:column;gap:0}
+  @media (min-width:1000px){
+    /* настройки слева, живой чат справа и не уезжает при прокрутке */
+    .cb-layout{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:18px;align-items:start}
+    .cb-side{order:2;position:sticky;top:96px}
+    .cb-form{order:1}
+  }
+  .cb-menu{display:flex;flex-direction:column;gap:10px;margin-top:6px}
+  .cb-btnrow{display:flex;align-items:flex-start;gap:12px}
+  .cb-btnrow .switch-track{flex:0 0 auto;margin-top:7px}
+  .cb-lock{flex:0 0 44px;text-align:center;color:var(--muted);font-size:10px;margin-top:12px}
+  .cb-btnfield{flex:1;min-width:0}
+  .cb-btnfield small{display:block;color:var(--muted);font-size:11.5px;margin-top:4px;line-height:1.35}
+  .cb-views{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 12px}
+  .cb-view{background:var(--surface-2);border:1px solid var(--surface-2);padding:6px 11px;font-size:12px;cursor:pointer;border-radius:999px}
+  .cb-view.active{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+
+  /* Чат нарочно в палитре тёмного Telegram, а не админки: это превью того,
+     что увидит покупатель у себя в клиенте. */
+  .tg{
+    --tg-bg:#0e1621; --tg-in:#182533; --tg-out:#2b5278; --tg-text:#f5f5f5; --tg-muted:#7f91a4;
+    --tg-btn:rgba(255,255,255,.08); --tg-kb:#17212b; --tg-link:#6ab3f3;
+    background:var(--tg-bg);color:var(--tg-text);border-radius:14px;overflow:hidden;
+    display:flex;flex-direction:column;height:560px;max-height:72vh;
+    font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  .tg-feed{flex:1;overflow-y:auto;padding:12px 10px;display:flex;flex-direction:column;gap:6px}
+  .tg-msg{max-width:88%;border-radius:12px;overflow:hidden;word-wrap:break-word}
+  .tg-msg.in{align-self:flex-start;background:var(--tg-in);border-bottom-left-radius:4px}
+  .tg-msg.out{align-self:flex-end;background:var(--tg-out);border-bottom-right-radius:4px}
+  .tg-text{padding:7px 10px}
+  .tg-text code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+  .tg-link{color:var(--tg-link)}
+  .tg-photo{display:block;width:100%;max-height:260px;object-fit:cover;background:#000}
+  .tg-ikb{align-self:flex-start;width:88%;display:flex;flex-direction:column;gap:3px;margin-top:-2px}
+  .tg-ikb-row{display:flex;gap:3px}
+  .tg-ikb-btn{flex:1;min-width:0;background:var(--tg-btn);border-radius:6px;padding:7px 6px;text-align:center;
+    font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative}
+  .tg-ikb-btn i{font-style:normal;position:absolute;top:2px;right:4px;font-size:9px;opacity:.7}
+  .tg-input{background:var(--tg-kb);color:var(--tg-muted);padding:10px 12px;font-size:13px;border-top:1px solid rgba(255,255,255,.06)}
+  .tg-rkb{background:var(--tg-kb);padding:0 6px 8px;display:flex;flex-direction:column;gap:5px}
+  .tg-rkb:empty{display:none}
+  .tg-rkb-row{display:flex;gap:5px}
+  .tg-rkb-btn{flex:1;min-width:0;background:#2b3a4a;border-radius:7px;padding:9px 6px;text-align:center;font-size:12.5px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 1px 0 rgba(0,0,0,.35)}
+  .tg-empty{margin:auto;padding:24px;text-align:center;color:var(--tg-muted);font-size:13px;line-height:1.5}
+
   /* диагностика */
   .check{display:flex;gap:10px;align-items:flex-start;padding:11px 0;border-bottom:1px solid var(--surface-2)}
   .check:last-child{border-bottom:none}
@@ -394,6 +442,7 @@
   <div class="panel" id="panel-promo"></div>
   <div class="panel" id="panel-notify"></div>
   <div class="panel" id="panel-bot"></div>
+  <div class="panel" id="panel-chatbot"></div>
   <div class="panel" id="panel-channel"></div>
   <div class="panel" id="panel-products"></div>
   <div class="panel" id="panel-orders"></div>
@@ -648,6 +697,8 @@ function afterChange(path){
   if(path === 'brand.shopName') $('shopTitle').textContent = settings.brand.shopName || 'Магазин';
   // у каждого мерчанта свой набор ключей — перерисовываем форму под выбранного
   if(path === 'payments.provider') buildPayments();
+  // живой чат на вкладке «Чат-бот»
+  if(activeTab === 'chatbot') refreshChatPreview();
 }
 
 function renderTags(box, path){
@@ -711,7 +762,7 @@ function renderLines(box, path){
 const TABS = [
   ['dashboard','Обзор'], ['brand','Бренд'], ['theme','Тема'], ['catalog','Каталог'],
   ['commerce','Продажи'], ['checkout','Форма заказа'], ['payments','Оплата'], ['promo','Промокоды'], ['notify','Уведомления'],
-  ['bot','Бот'], ['channel','Канал'], ['products','Товары'], ['orders','Заказы'], ['backup','Бэкапы'], ['advanced','Ещё'],
+  ['bot','Бот'], ['chatbot','Чат-бот'], ['channel','Канал'], ['products','Товары'], ['orders','Заказы'], ['backup','Бэкапы'], ['advanced','Ещё'],
 ];
 let activeTab = 'dashboard';
 
@@ -767,6 +818,7 @@ function buildPanel(id){
   if(id === 'promo')     return buildPromo();
   if(id === 'notify')    return buildNotify();
   if(id === 'bot'){ renderPanel('panel-bot', PANEL_BOT()); return buildBotToken(); }
+  if(id === 'chatbot')   return buildChatbot();
   if(id === 'channel')   return renderPanel('panel-channel', PANEL_CHANNEL());
   if(id === 'advanced')  return buildAdvanced();
 }
@@ -1272,10 +1324,9 @@ async function testNotification(){
 
 // ---------- Бот ----------
 const PANEL_BOT = () => ([
-  { title:'Поведение бота', hint:'Бот работает на вашем сервере через long polling — вебхук и домен для него не нужны. Токен задаётся в файле <code>.env</code>.',
+  { title:'Поведение бота', hint:'Бот работает на вашем сервере: с доменом — через вебхук, без домена — через long polling. Кнопки, тексты и меню магазина прямо в чате — на вкладке <b>«Чат-бот»</b>.',
     fields:[
       F.sw('bot.enabled','Бот отвечает'),
-      F.sw('bot.classicMenu','Магазин прямо в чате', { sub:'Каталог, корзина и оформление заказа на кнопках бота — для тех, кому неудобен мини-апп. Мини-апп остаётся доступен кнопкой' }),
       F.area('bot.welcomeText','Приветствие /start', { sub:'Переменные: {name}, {shop}' }),
       F.text('bot.buttonText','Текст кнопки-ссылки', { ph:'🛍 Открыть магазин' }),
       F.area('bot.helpText','Ответ на /help и /support'),
@@ -1287,6 +1338,164 @@ const PANEL_BOT = () => ([
   { title:'Анонсы подписчикам', hint:'Подписчики — только те, кто сам нажал «🔔 Подписаться на анонсы» в приветствии бота или отправил /subscribe. Анонс уходит при сохранении товара с галочкой «Уведомить подписчиков» (вкладка «Товары»). Отписка — кнопка «🔕 Отписаться» или /unsubscribe.',
     fields:[ F.sw('announce.enabled','Анонсы о новинках и ценах') ]},
 ]);
+
+// ---------- Чат-бот: магазин прямо в чате ----------
+// Слева — настройки, справа — живой чат. Экраны чата собирает сервер тем же
+// кодом, что отвечает покупателям (POST /api/admin/chatbot-preview), на
+// текущих несохранённых настройках: превью не может разойтись с ботом.
+const CB_MENU = [
+  ['catalog', 'Каталог', 'всегда в меню'],
+  ['search',  'Поиск', ''],
+  ['cart',    'Корзина', 'только в режиме «Корзина + оформление»'],
+  ['orders',  'Мои заказы', 'в режимах с корзиной и заявками'],
+  ['manager', 'Менеджер', 'если указана ссылка или получатели уведомлений'],
+  ['help',    'Помощь', ''],
+];
+
+function cbMenuRows(){
+  return CB_MENU.map(([key, name, note]) => {
+    const on = key === 'catalog' ? true : !!getPath(settings, 'chatbot.show.' + key);
+    const toggle = key === 'catalog'
+      ? `<div class="cb-lock" title="Каталог в меню всегда">●</div>`
+      : `<div class="switch-track ${on ? 'on' : ''}" data-path="chatbot.show.${key}" data-kind="switch"><div class="switch-thumb"></div></div>`;
+    return `<div class="cb-btnrow">
+      ${toggle}
+      <div class="cb-btnfield">
+        <input type="text" data-path="chatbot.buttons.${key}" data-kind="text" maxlength="32"
+               value="${esc(getPath(settings, 'chatbot.buttons.' + key) || '')}" aria-label="Подпись: ${name}">
+        <small>${name}${note ? ' · ' + note : ''}</small>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+const PANEL_CHATBOT = () => ([
+  { title:'Магазин прямо в чате', hint:'Каталог, корзина и оформление заказа на обычных кнопках Telegram — для тех, у кого мини-апп не открывается или непривычен. Мини-апп остаётся доступен кнопкой на главном экране.',
+    fields:[ F.sw('bot.classicMenu','Включён') ]},
+  { title:'Меню под полем ввода', hint:'Кнопки, которые покупатель видит всегда. Пустая подпись — вернётся стандартная. Переименование безопасно: бот узнаёт и новые подписи, и старые.',
+    fields:[ F.text('chatbot.placeholder','Подсказка в поле ввода', { ph:'Выберите раздел в меню ниже' }) ],
+    html:`<div class="cb-menu">${cbMenuRows()}</div>` },
+  { title:'Главный экран', hint:'Открывается по /start следом за приветствием (приветствие — на вкладке «Бот»).',
+    fields:[
+      F.area('chatbot.homeText','Текст под названием магазина', { ph:'Выбирайте товары и оформляйте заказ прямо здесь, в чате 👇', sub:'Пусто — подсказка по режиму продаж' }),
+      F.sw('chatbot.showAppButton','Кнопка «📱 Открыть в приложении»', { sub:'Видна, если у магазина есть адрес мини-аппа' }),
+      F.sw('chatbot.showSubscribe','Кнопка «🔔 Сообщать о новинках»', { sub:'Видна, если включены анонсы на вкладке «Бот»' }),
+    ]},
+  { title:'Каталог', fields:[
+    F.text('chatbot.catalogTitle','Заголовок каталога', { ph:'🛍 Каталог', maxlength:32 }),
+    F.text('chatbot.catalogHint','Подсказка под заголовком', { ph:'Выберите раздел 👇' }),
+    F.text('chatbot.listHint','Подсказка в списке товаров', { ph:'Нажмите на товар, чтобы увидеть фото и подробности 👇' }),
+    F.range('chatbot.pageSize','Товаров на странице', { min:4, max:10 }),
+  ]},
+  { title:'Ответы бота', hint:'Обычный текст, эмодзи можно. Разметка не нужна — бот оформит сам.', fields:[
+    F.area('chatbot.cartEmptyText','Пустая корзина'),
+    F.area('chatbot.inquirySentText','Покупатель написал вопрос', { sub:'Вопрос уходит менеджеру в уведомления, покупатель видит этот ответ' }),
+    F.area('chatbot.unknownText','Ответ на текст, если связь с менеджером не настроена'),
+    F.sw('chatbot.helpGuide','Подсказка по кнопкам в /help', { sub:'Дописывается после текста помощи с вкладки «Бот»' }),
+  ]},
+]);
+
+const CB_VIEWS = [['home','Главная'], ['catalog','Каталог'], ['product','Товар'], ['cart','Корзина'], ['help','Помощь']];
+let cbView = 'home';
+let cbData = null;
+let cbSeq = 0;
+
+function buildChatbot(){
+  $('panel-chatbot').innerHTML = `
+    <div class="cb-layout">
+      <div class="cb-side">
+        <div class="card cb-preview-card">
+          <h2>Как это выглядит</h2>
+          <div class="hint">Живой чат с вашими товарами. Меняйте настройки — экран перерисуется сам. Сохранить — кнопка внизу.</div>
+          <div class="cb-views" id="cbViews"></div>
+          <div class="tg" id="cbChat"><div class="tg-empty">Загружаю…</div></div>
+        </div>
+      </div>
+      <div class="cb-form" id="cbForm"></div>
+    </div>`;
+  $('cbForm').innerHTML = PANEL_CHATBOT().map(renderCard).join('');
+  bindPanel($('cbForm'));
+  renderCbViews();
+  refreshChatPreview();
+}
+
+function renderCbViews(){
+  $('cbViews').innerHTML = CB_VIEWS.map(([id, label]) =>
+    `<button type="button" class="cb-view ${id === cbView ? 'active' : ''}" data-view="${id}">${label}</button>`).join('');
+  $('cbViews').querySelectorAll('[data-view]').forEach(b => b.onclick = () => {
+    cbView = b.dataset.view; renderCbViews(); renderChatPreview();
+  });
+}
+
+const refreshChatPreview = debounce(async () => {
+  if(activeTab !== 'chatbot' || !$('cbChat')) return;
+  const seq = ++cbSeq;
+  try{
+    const data = await api('/api/admin/chatbot-preview', { method:'POST', body: JSON.stringify({ settings }) });
+    if(seq !== cbSeq) return; // пришёл ответ на устаревший набор настроек
+    cbData = data;
+    renderChatPreview();
+  }catch(e){
+    if(seq === cbSeq) $('cbChat').innerHTML = `<div class="tg-empty">Превью недоступно: ${esc(e.message)}</div>`;
+  }
+}, 250);
+
+// Разметка сообщений Telegram (b, i, s, u, code, a) → безопасный HTML.
+// Всё остальное показываем как текст: тексты продавца не исполняются.
+function tgHtml(src){
+  const tag = /<(\/?)(b|i|s|u|code|a)(?:\s[^>]*)?>/g;
+  const text = t => esc(t.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&amp;/g,'&'));
+  let out = '', last = 0, m;
+  src = String(src || '');
+  while((m = tag.exec(src))){
+    out += text(src.slice(last, m.index));
+    out += m[2] === 'a' ? (m[1] ? '</span>' : '<span class="tg-link">') : `<${m[1]}${m[2]}>`;
+    last = tag.lastIndex;
+  }
+  return (out + text(src.slice(last))).replace(/\n/g, '<br>');
+}
+
+function tgInline(rows){
+  if(!rows || !rows.length) return '';
+  return `<div class="tg-ikb">${rows.map(r => `<div class="tg-ikb-row">${r.map(b => {
+    const mark = b.web_app ? '<i>▣</i>' : b.url ? '<i>↗</i>' : '';
+    return `<div class="tg-ikb-btn">${esc(b.text)}${mark}</div>`;
+  }).join('')}</div>`).join('')}</div>`;
+}
+
+function tgBot(screen){
+  if(!screen) return '';
+  const photo = screen.photo ? `<img class="tg-photo" src="/api/image?id=${encodeURIComponent(screen.photo)}" alt="">` : '';
+  return `<div class="tg-msg in">${photo}<div class="tg-text">${tgHtml(screen.text)}</div></div>${tgInline(screen.kb)}`;
+}
+const tgMe = text => `<div class="tg-msg out"><div class="tg-text">${esc(text)}</div></div>`;
+
+function renderChatPreview(){
+  const box = $('cbChat');
+  if(!box || !cbData) return;
+  const b = settings.chatbot.buttons;
+  if(!settings.bot.classicMenu){
+    box.innerHTML = `<div class="tg-empty">Магазин в чате выключен — бот только приветствует и открывает мини-апп. Включите его в первом блоке слева.</div>`;
+    return;
+  }
+  let feed = '';
+  if(cbView === 'home')    feed = tgMe('/start') + `<div class="tg-msg in"><div class="tg-text">${tgHtml(cbData.welcome)}</div></div>` + tgBot(cbData.home);
+  if(cbView === 'catalog') feed = tgMe(b.catalog) + tgBot(cbData.catalog);
+  if(cbView === 'product') feed = cbData.product ? tgBot(cbData.product) : '<div class="tg-empty">В каталоге пока нет товаров</div>';
+  if(cbView === 'cart')    feed = tgMe(b.cart) + tgBot(cbData.cart);
+  if(cbView === 'help')    feed = tgMe(b.help) + `<div class="tg-msg in"><div class="tg-text">${tgHtml(cbData.help.text)}</div></div>`;
+
+  const kb = cbData.keyboard || {};
+  const keys = (kb.keyboard || []).map(r => `<div class="tg-rkb-row">${r.map(k => `<div class="tg-rkb-btn">${esc(k.text)}</div>`).join('')}</div>`).join('');
+  box.innerHTML = `
+    <div class="tg-feed" id="cbFeed">${feed}</div>
+    <div class="tg-input">${esc(kb.input_field_placeholder || 'Сообщение')}</div>
+    <div class="tg-rkb">${keys}</div>`;
+  const f = $('cbFeed');
+  f.scrollTop = f.scrollHeight;
+  // фото товара догружается после отрисовки — докручиваем ленту ещё раз
+  f.querySelectorAll('img').forEach(img => img.onload = () => { f.scrollTop = f.scrollHeight; });
+}
 
 // ---------- Канал ----------
 const PANEL_CHANNEL = () => ([

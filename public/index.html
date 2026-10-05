@@ -2467,9 +2467,11 @@ async function loadSettings(){
   }
 }
 
-async function loadProducts(){
+// pending — уже запущенный запрос (старт мини-аппа качает каталог параллельно
+// с настройками); без него — свежий запрос, как при «Повторить» и после заказа.
+async function loadProducts(pending){
   try{
-    const res = await fetch('/api/products');
+    const res = await (pending || fetch('/api/products'));
     if(!res.ok) throw new Error('bad status');
     products = await res.json();
     loadError = false;
@@ -2608,14 +2610,18 @@ if(IS_PREVIEW){
   if(settings) start(); else setTimeout(start, 900);
 })();
 
-// порядок важен: сперва тема (иначе увидим вспышку дефолтной), потом товары
+// порядок применения важен: сперва тема (иначе увидим вспышку дефолтной), потом
+// товары. А вот качать их можно одновременно: раньше каталог ждал, пока придут
+// настройки, и открытие мини-аппа теряло целый сетевой круг.
 renderSkeletons();
 (async () => {
+  const productsReq = fetch('/api/products');
+  productsReq.catch(() => {}); // ошибку разберёт loadProducts, не unhandledrejection
   // В превью настройки приходят из админки сообщением. Тянуть их ещё и с сервера
   // нельзя: ответ может прийти ПОСЛЕ пуша и затереть несохранённые правки —
   // продавец увидел бы, что его изменения «откатываются» сами.
   if(!IS_PREVIEW) await loadSettings();
-  await loadProducts();
+  await loadProducts(productsReq);
 })();
 
 // возвращаем позицию скролла при повторном входе в мини-апп

@@ -19,27 +19,26 @@
 const { esc } = require('./telegram');
 const { money, applyPromo, placeOrder, createPaymentLink } = require('./checkout');
 const { STATUS_LABELS } = require('./orders');
+const { DEFAULTS } = require('./settings');
 
-const PAGE_SIZE = 8;              // товаров на одной странице списка
 const CAPTION_MAX = 1024;         // потолок подписи к фото в Telegram
 const SEARCH_LIMIT = 50;
 const SESSION_TTL_MS = 60 * 24 * 3600 * 1000; // брошенная корзина живёт два месяца
 const SESSION_SOFT_CAP = 3000;    // после этого числа чатов чистим протухшие
 
-// Подписи постоянной клавиатуры. Нажатие приходит обычным текстом — по этим
-// же строкам его и узнаём.
-const KB = {
-  catalog: '🛍 Каталог',
-  search: '🔎 Поиск',
-  cart: '🛒 Корзина',
-  orders: '📦 Мои заказы',
-  manager: '💬 Менеджер',
-  help: '❓ Помощь',
-};
-const KEYBOARD_NAV = new Map([
-  [KB.catalog, 'catalog'], [KB.search, 'search'], [KB.cart, 'cart'],
-  [KB.orders, 'orders'], [KB.manager, 'manager'], [KB.help, 'help'],
-]);
+// Подписи постоянной клавиатуры задаёт продавец (вкладка «Чат-бот»), это
+// стандартные. Нажатие приходит обычным текстом — по подписи его и узнаём.
+const KB = DEFAULTS.chatbot.buttons;
+const NAV_KEYS = ['catalog', 'search', 'cart', 'orders', 'manager', 'help'];
+
+// Узнаём и текущие подписи, и стандартные: у покупателя может остаться
+// клавиатура, присланная до того, как продавец переименовал кнопки.
+function navFromKeyboard(s, text) {
+  if (!text) return undefined;
+  const b = s.chatbot.buttons;
+  return NAV_KEYS.find(k => b[k] === text) || NAV_KEYS.find(k => KB[k] === text);
+}
+const pageSize = s => s.chatbot.pageSize || 8;
 const COMMAND_NAV = new Map([
   ['menu', 'home'], ['shop', 'catalog'], ['catalog', 'catalog'], ['search', 'search'],
   ['cart', 'cart'], ['orders', 'orders'], ['support', 'manager'], ['manager', 'manager'],
@@ -52,6 +51,9 @@ const KB_CANCEL = '✖️ Отменить оформление';
 // Шаги оформления в порядке показа. Ненужные (поле выключено в админке)
 // пропускаются — так чат спрашивает ровно то же, что форма мини-аппа.
 const STEPS = ['name', 'phone', 'email', 'delivery', 'address', 'payment', 'comment', 'promo', 'agree', 'confirm'];
+
+// Чистая навигация: подсказки в ответе на нажатие не бывает.
+const NAV_OPS = new Set(['x', 'h', 'c', 'l', 'p', 'C', 'O', 'M', 'q']);
 
 const STATUS_ICONS = { new: '🆕', processing: '⏳', shipped: '🚚', done: '✅', cancelled: '✖️' };
 
@@ -150,8 +152,18 @@ function createShopBot(t, helpers) {
   const tag = t.id ? `[shopbot:${t.id}]` : '[shopbot]';
 
   // id картинки → file_id в Telegram. Первый показ грузит файл с диска,
-  // дальше Telegram получает уже готовый file_id.
-  const photoIds = new Map();
+  // дальше Telegram получает уже готовый file_id. Соответствие хранится в
+  // документе магазина и переживает перезапуск — иначе после каждого деплоя
+  // каждая карточка заново заливала бы фото. file_id действителен только для
+  // своего бота, поэтому документ помечен отпечатком токена: сменили бота —
+  // старые id просто не используются.
+  const PHOTOS_DOC = 'tg-photos';
+  const botMark = require('node:crypto').createHash('sha256').update(String(t.telegram.BOT_TOKEN || '')).digest('hex').slice(0, 12);
+  const photoIds = new Map((() => {
+    const doc = t.store.read(PHOTOS_DOC, null);
+    return doc && doc.bot === botMark && doc.ids && typeof doc.ids === 'object' ? Object.entries(doc.ids) : [];
+  })());
+  const savePhotoIds = () => t.store.write(PHOTOS_DOC, { bot: botMark, ids: Object.fromEntries(photoIds) });
   // Чаты, где прямо сейчас оформляется заказ: двойное нажатие «Подтвердить»
   // не должно превратиться в два одинаковых заказа.
   const placing = new Set();
@@ -258,9 +270,10 @@ function createShopBot(t, helpers) {
 
   function cartButtonLabel(s, sess) {
     const lines = cartLines(sess);
-    if (!lines.length) return KB.cart;
+    const base = s.chatbot.buttons.cart;
+    if (!lines.length) return base;
     const n = lines.reduce((k, l) => k + l.qty, 0);
-    return s.commerce.priceHidden ? `🛒 Корзина · ${n} шт.` : `🛒 Корзина · ${n} шт. · ${money(cartTotal(lines), s)}`;
+    return s.commerce.priceHidden ? `${base} · ${n} шт.` : `${base} · ${n} шт. · ${money(cartTotal(lines), s)}`;
   }
 
   // ----- доставка экранов -----
@@ -272,6 +285,7 @@ function createShopBot(t, helpers) {
       const r = await tgApi('sendPhoto', { ...base, photo: cached });
       if (r.ok) return r;
       photoIds.delete(imageId);
+      savePhotoIds();
     }
     const file = t.store.imagePath(imageId);
     if (!file) return { ok: false, description: 'файл картинки не найден' };
@@ -289,6 +303,7 @@ function createShopBot(t, helpers) {
       const r = await tgApi('editMessageMedia', { ...target, media: { ...media, media: cached } });
       if (r.ok || notModified(r)) return { ok: true };
       photoIds.delete(imageId);
+      savePhotoIds();
     }
     const file = t.store.imagePath(imageId);
     if (!file) return { ok: false, description: 'файл картинки не найден' };
@@ -299,7 +314,11 @@ function createShopBot(t, helpers) {
 
   function rememberPhoto(imageId, r) {
     const sizes = r && r.ok && r.result && r.result.photo;
-    if (Array.isArray(sizes) && sizes.length) photoIds.set(imageId, sizes[sizes.length - 1].file_id);
+    if (!Array.isArray(sizes) || !sizes.length) return;
+    const id = sizes[sizes.length - 1].file_id;
+    if (photoIds.get(imageId) === id) return;
+    photoIds.set(imageId, id);
+    savePhotoIds();
   }
 
   async function sendText(chatId, text, markup) {
@@ -355,19 +374,27 @@ function createShopBot(t, helpers) {
 
   const inquiriesReachManager = s => s.notify.enabled && s.notify.onInquiry && s.notify.chatIds.length > 0;
   const managerAvailable = s => Boolean(managerUrl(s)) || inquiriesReachManager(s);
+  // Что показывать в меню: выбор продавца плюс то, что вообще имеет смысл
+  // при текущем режиме продаж и настроенной связи.
+  const shown = {
+    search: s => s.chatbot.show.search,
+    cart: s => s.chatbot.show.cart && hasCart(s),
+    orders: s => s.chatbot.show.orders && hasOrders(s),
+    manager: s => s.chatbot.show.manager && managerAvailable(s),
+    help: s => s.chatbot.show.help,
+  };
 
+  // Раскладка по два в ряд: каталог всегда первым, дальше — включённые пункты.
   function mainKeyboard(s) {
-    const rows = [[KB.catalog, KB.search]];
-    const second = [];
-    if (hasCart(s)) second.push(KB.cart);
-    if (hasOrders(s)) second.push(KB.orders);
-    if (second.length) rows.push(second);
-    rows.push(managerAvailable(s) ? [KB.manager, KB.help] : [KB.help]);
+    const b = s.chatbot.buttons;
+    const labels = [b.catalog, ...['search', 'cart', 'orders', 'manager', 'help'].filter(k => shown[k](s)).map(k => b[k])];
+    const rows = [];
+    for (let i = 0; i < labels.length; i += 2) rows.push(labels.slice(i, i + 2).map(text => ({ text })));
     return {
-      keyboard: rows.map(r => r.map(text => ({ text }))),
+      keyboard: rows,
       resize_keyboard: true,
       is_persistent: true,
-      input_field_placeholder: 'Выберите раздел в меню ниже',
+      input_field_placeholder: s.chatbot.placeholder || undefined,
     };
   }
 
@@ -383,19 +410,23 @@ function createShopBot(t, helpers) {
     const L = [`<b>${b.shopIcon ? esc(b.shopIcon) + ' ' : ''}${esc(b.shopName)}</b>`];
     if (b.tagline) L.push(`<i>${esc(b.tagline)}</i>`);
     if (s.profile.aboutText) L.push('', esc(s.profile.aboutText));
-    L.push('', hasCart(s)
-      ? 'Выбирайте товары и оформляйте заказ прямо здесь, в чате 👇'
-      : 'Смотрите каталог прямо здесь, в чате 👇');
+    const intro = s.chatbot.homeText.trim()
+      ? esc(s.chatbot.homeText.trim())
+      : hasCart(s)
+        ? 'Выбирайте товары и оформляйте заказ прямо здесь, в чате 👇'
+        : 'Смотрите каталог прямо здесь, в чате 👇';
+    L.push('', intro);
 
-    const kb = [[btn('🛍 Каталог', 'c'), btn('🔎 Поиск', 'q')]];
+    const labels = s.chatbot.buttons;
+    const kb = [[btn(labels.catalog, 'c'), ...(shown.search(s) ? [btn(labels.search, 'q')] : [])]];
     const second = [];
     if (hasCart(s)) second.push(btn(cartButtonLabel(s, sess), 'C'));
-    if (hasOrders(s)) second.push(btn('📦 Мои заказы', 'O'));
+    if (shown.orders(s)) second.push(btn(labels.orders, 'O'));
     if (second.length) kb.push(second);
-    const app = appButton(s, chatId);
+    const app = s.chatbot.showAppButton ? appButton(s, chatId) : null;
     if (app) kb.push([app]);
-    if (managerAvailable(s)) kb.push([btn('💬 Связаться с менеджером', 'M')]);
-    if (s.announce && s.announce.enabled) {
+    if (shown.manager(s)) kb.push([btn('💬 Связаться с менеджером', 'M')]);
+    if (s.chatbot.showSubscribe && s.announce && s.announce.enabled) {
       const users = t.store.read('users', {});
       const on = Boolean(users[chatId] && users[chatId].subAnnounce === true);
       kb.push([on ? btn('🔕 Не сообщать о новинках', 'u:0') : btn('🔔 Сообщать о новинках', 'u:1')]);
@@ -421,8 +452,9 @@ function createShopBot(t, helpers) {
       }
     }
     kb.push([btn(`📋 Все товары · ${all.length}`, 'l:a:0')]);
-    kb.push([btn('🔎 Поиск', 'q'), btn('🏠 Главная', 'h')]);
-    return { text: '🛍 <b>Каталог</b>\n\nВыберите раздел 👇', kb };
+    kb.push([...(shown.search(s) ? [btn(s.chatbot.buttons.search, 'q')] : []), btn('🏠 Главная', 'h')]);
+    const hint = s.chatbot.catalogHint.trim();
+    return { text: `<b>${esc(s.chatbot.catalogTitle)}</b>${hint ? '\n\n' + esc(hint) : ''}`, kb };
   }
 
   function productLabel(p, s) {
@@ -437,12 +469,13 @@ function createShopBot(t, helpers) {
     if (!items.length) {
       return {
         text: `<b>${esc(title)}</b>\n\nЗдесь пока пусто.`,
-        kb: [[back, btn('🔎 Поиск', 'q')]],
+        kb: [[back, ...(shown.search(s) ? [btn(s.chatbot.buttons.search, 'q')] : [])]],
       };
     }
-    const pages = Math.ceil(items.length / PAGE_SIZE);
+    const size = pageSize(s);
+    const pages = Math.ceil(items.length / size);
     const pg = Math.min(Math.max(0, Number(page) || 0), pages - 1);
-    const slice = items.slice(pg * PAGE_SIZE, pg * PAGE_SIZE + PAGE_SIZE);
+    const slice = items.slice(pg * size, pg * size + size);
 
     const kb = slice.map(p => [btn(productLabel(p, s), `p:${p.id}:${key}:0`)]);
     if (pages > 1) {
@@ -458,8 +491,9 @@ function createShopBot(t, helpers) {
 
     const count = `${items.length} ${plural(items.length, 'товар', 'товара', 'товаров')}`;
     const where = pages > 1 ? ` · страница ${pg + 1} из ${pages}` : '';
+    const hint = s.chatbot.listHint.trim();
     return {
-      text: `<b>${esc(title)}</b>\n${count}${where}\n\nНажмите на товар, чтобы увидеть фото и подробности 👇`,
+      text: `<b>${esc(title)}</b>\n${count}${where}${hint ? '\n\n' + esc(hint) : ''}`,
       kb,
     };
   }
@@ -525,7 +559,7 @@ function createShopBot(t, helpers) {
         btn('➡️', `p:${next.id}:${key}:0`),
       ]);
     }
-    const page = idx >= 0 ? Math.floor(idx / PAGE_SIZE) : 0;
+    const page = idx >= 0 ? Math.floor(idx / pageSize(s)) : 0;
     kb.push([btn('📋 К списку', `l:${key}:${page}`), btn('🏠 Главная', 'h')]);
 
     return { text: productCaption(p, s, sess.cart[p.id] || 0), kb, photo: images[im] || null };
@@ -535,7 +569,7 @@ function createShopBot(t, helpers) {
     const lines = cartLines(sess);
     if (!lines.length) {
       return {
-        text: '🛒 <b>Корзина пуста</b>\n\nЗагляните в каталог — там есть из чего выбрать 👇',
+        text: `🛒 <b>Корзина пуста</b>${s.chatbot.cartEmptyText.trim() ? '\n\n' + esc(s.chatbot.cartEmptyText.trim()) : ''}`,
         kb: [[btn('🛍 Каталог', 'c'), btn('🏠 Главная', 'h')]],
       };
     }
@@ -610,13 +644,15 @@ function createShopBot(t, helpers) {
   function helpText(s, name) {
     const L = [];
     const own = fill(s.bot.helpText, { name, shop: esc(s.brand.shopName) }).trim();
+    if (!s.chatbot.helpGuide) return own || 'Выберите раздел в меню под полем ввода 👇';
     if (own) L.push(own, '');
+    const b = s.chatbot.buttons;
     L.push('<b>Как пользоваться</b>');
-    L.push(`${KB.catalog} — товары по разделам, с фото и ценами`);
-    L.push(`${KB.search} — найти товар по названию`);
-    if (hasCart(s)) L.push(`${KB.cart} — проверить выбранное и оформить заказ`);
-    if (hasOrders(s)) L.push(`${KB.orders} — что с вашими заказами`);
-    if (managerAvailable(s)) L.push(`${KB.manager} — задать вопрос человеку`);
+    L.push(`${esc(b.catalog)} — товары по разделам, с фото и ценами`);
+    if (shown.search(s)) L.push(`${esc(b.search)} — найти товар по названию`);
+    if (shown.cart(s)) L.push(`${esc(b.cart)} — проверить выбранное и оформить заказ`);
+    if (shown.orders(s)) L.push(`${esc(b.orders)} — что с вашими заказами`);
+    if (shown.manager(s)) L.push(`${esc(b.manager)} — задать вопрос человеку`);
     L.push('', 'Кнопки всегда внизу, под полем ввода. Если они пропали — отправьте /start');
     return L.join('\n');
   }
@@ -996,7 +1032,7 @@ function createShopBot(t, helpers) {
 
     // Пункты постоянного меню и команды разделов уводят из любого шага.
     // Черновик заказа при этом сохраняется — «Оформить» продолжит с ним.
-    const nav = KEYBOARD_NAV.get(text) || COMMAND_NAV.get(cmd);
+    const nav = navFromKeyboard(s, text) || COMMAND_NAV.get(cmd);
 
     if (nav) {
       if (nav === 'cancel') {
@@ -1045,13 +1081,14 @@ function createShopBot(t, helpers) {
       const who = from.username ? `@${esc(from.username)}` : `<code>${chatId}</code>`;
       await notifyManagers(s, `💬 Сообщение боту от ${name} ${who}:\n\n${esc(text)}`).catch(() => {});
       await send(chatId, {
-        text: '✅ Сообщение передано менеджеру — он ответит вам здесь, в Telegram.\n\nА пока можно заглянуть в каталог 👇',
-        kb: [[btn('🛍 Каталог', 'c'), btn('🏠 Главная', 'h')]],
+        text: esc(s.chatbot.inquirySentText.trim() || DEFAULTS.chatbot.inquirySentText),
+        kb: [[btn(s.chatbot.buttons.catalog, 'c'), btn('🏠 Главная', 'h')]],
       });
     } else {
       await tgApi('sendMessage', {
         chat_id: chatId,
-        text: 'Я отвечаю на кнопки меню 🙂 Выберите раздел внизу или отправьте /help',
+        text: esc(s.chatbot.unknownText.trim() || DEFAULTS.chatbot.unknownText),
+        parse_mode: 'HTML',
         reply_markup: mainKeyboard(s),
       });
     }
@@ -1068,6 +1105,14 @@ function createShopBot(t, helpers) {
     const [op] = parts;
     let toast = '';
     let alert = false;
+    // Переходы по экранам отвечаем сразу: спиннер на кнопке гаснет мгновенно,
+    // а не после того, как экран перерисуется и, бывает, догрузится фото.
+    // Действиям с ответом-подсказкой (корзина, оплата, шаги) отвечаем в конце.
+    let answered = false;
+    if (NAV_OPS.has(op)) {
+      answered = true;
+      tgApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+    }
 
     try {
       const s = settings();
@@ -1199,12 +1244,33 @@ function createShopBot(t, helpers) {
       console.error(`${tag} callback ${cb.data} failed:`, e.message);
       toast = 'Что-то пошло не так, попробуйте ещё раз';
     } finally {
-      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: toast || undefined, show_alert: alert || undefined })
-        .catch(() => {});
+      if (!answered) {
+        await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: toast || undefined, show_alert: alert || undefined })
+          .catch(() => {});
+      }
     }
   }
 
-  return { handleMessage, handleCallback, ownsCallback, welcome, mainKeyboard, KB };
+  // Экраны для превью в админке: те же функции, что у живого бота, только на
+  // несохранённых настройках и с пустой сессией. На главной и в корзине лежит
+  // первый товар — чтобы было видно, как выглядит заполненная корзина.
+  function preview(s, sampleName = 'Анна') {
+    const empty = { cart: {}, step: null, draft: null, contact: {}, search: [] };
+    const all = visibleProducts(s);
+    const first = all.find(p => p.stock !== 0) || all[0] || null;
+    const withItem = first && hasCart(s) ? { ...empty, cart: { [first.id]: 1 } } : empty;
+    return {
+      keyboard: mainKeyboard(s),
+      welcome: fill(s.bot.welcomeText, { name: esc(sampleName), shop: esc(s.brand.shopName) }),
+      home: homeScreen(s, withItem, 1),
+      catalog: catalogScreen(s, empty),
+      product: first ? productScreen(s, withItem, first.id, 'a', 0) : null,
+      cart: cartScreen(s, withItem),
+      help: { text: helpText(s, esc(sampleName)) },
+    };
+  }
+
+  return { handleMessage, handleCallback, ownsCallback, welcome, mainKeyboard, preview, KB };
 }
 
 // Команды для меню «/» в режиме магазина в чате.

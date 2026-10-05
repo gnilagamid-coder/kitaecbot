@@ -80,10 +80,10 @@ ME_CODE="$(curl -s -o /dev/null -w '%{http_code}' "https://api.telegram.org/bot$
 # ---------- файлы ----------
 say "Копирую в ${APP_DIR}"
 mkdir -p "$APP_DIR"
-rsync -a --delete \
-  --exclude 'data' --exclude '.env' --exclude '.git' --exclude 'node_modules' \
-  "$SRC_DIR"/ "$APP_DIR"/
-mkdir -p "$APP_DIR/data/images"
+# Что не копируем (данные, секреты, архивы) — общий список для всех скриптов
+[ -f "$SRC_DIR/deploy-excludes.txt" ] || die "Нет $SRC_DIR/deploy-excludes.txt — код скачан не полностью"
+rsync -a --delete --exclude-from="$SRC_DIR/deploy-excludes.txt" "$SRC_DIR"/ "$APP_DIR"/
+mkdir -p "$APP_DIR/data/images" "$APP_DIR/backups"
 
 say "Ставлю зависимости"
 # mysql2 нужен сервису даже в файловом режиме (server/db.js грузится всегда),
@@ -225,12 +225,12 @@ EnvironmentFile=${APP_DIR}/.env
 ExecStart=/usr/bin/node ${APP_DIR}/server/index.js
 Restart=always
 RestartSec=3
-# базовая изоляция: сервису доступна на запись только своя папка data
+# базовая изоляция: на запись сервису доступны только его data и backups
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=${APP_DIR}/data
+ReadWritePaths=${APP_DIR}/data -${APP_DIR}/backups
 
 [Install]
 WantedBy=multi-user.target

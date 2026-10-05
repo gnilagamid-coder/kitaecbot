@@ -9,6 +9,11 @@
 # Запускать от root:  bash add-bot.sh
 set -euo pipefail
 
+# Всё тело — в фигурных скобках: bash разбирает блок целиком до запуска.
+# Скрипт сам делает git pull и может подменить собственный файл посреди
+# прогона — без скобок bash дочитывал бы уже новый файл со старого смещения.
+{
+
 say()  { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m!  %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31mX  %s\033[0m\n' "$*" >&2; exit 1; }
@@ -22,6 +27,8 @@ echo
 echo "──────────── Новый магазин ────────────"
 NAME="$(ask 'Имя экземпляра (латиницей: например second)' '')"
 echo "$NAME" | grep -qE '^[a-z0-9][a-z0-9-]*$' || die "Имя — строчные латинские буквы/цифры/дефис, без пробелов"
+# main — имя первого магазина в update.sh (bash update.sh main)
+[ "$NAME" != "main" ] || die "Имя main занято первым магазином — выберите другое"
 APP_DIR="/opt/shops/${NAME}"
 SERVICE="tg-shop-${NAME}"
 [ -e "$APP_DIR" ] && die "Папка $APP_DIR уже есть — имя занято"
@@ -37,23 +44,38 @@ DOMAIN="$(ask 'Домен (например shop2.example.com)' '')"
 ADMIN_TOKEN="$(ask 'Пароль в админку (Enter — сгенерировать)' '')"
 [ -n "$ADMIN_TOKEN" ] || ADMIN_TOKEN="$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 24)"
 
-# Порт подбираем сами: первый свободный начиная с 3001.
+# Порт подбираем сами: первый, который никто не слушает и который не записан
+# в .env другого магазина — остановленный магазин порт не слушает, но займёт
+# его снова при старте.
+TAKEN="$(sed -n 's/^PORT=//p' /opt/tg-shop/.env /opt/shops/*/.env 2>/dev/null | tr '\n' ' ')"
 PORT=3001
-while ss -tln | awk '{print $4}' | grep -qE ":${PORT}$"; do PORT=$((PORT + 1)); done
+while ss -tln | awk '{print $4}' | grep -qE ":${PORT}$" || [[ " $TAKEN " == *" $PORT "* ]]; do PORT=$((PORT + 1)); done
 
 say "Проверяю токен бота"
 ME_CODE="$(curl -s -o /dev/null -w '%{http_code}' "https://api.telegram.org/bot${BOT_TOKEN}/getMe" || true)"
 [ "$ME_CODE" = "200" ] || die "Telegram ответил «${ME_CODE}» на getMe — токен неверный или отозван"
 
+# Новый бот должен родиться на том же коде, что и остальные: подтягиваем
+# исходник из git. Локальные правки не трогаем — тогда только предупреждаем.
+if [ -d "$SRC_DIR/.git" ]; then
+  say "Сверяю код с git"
+  if git -C "$SRC_DIR" diff --quiet && git -C "$SRC_DIR" diff --cached --quiet; then
+    git -C "$SRC_DIR" pull --ff-only --quiet origin "$(git -C "$SRC_DIR" rev-parse --abbrev-ref HEAD)" \
+      && echo "   код: $(git -C "$SRC_DIR" rev-parse --short HEAD)" \
+      || warn "git pull не прошёл — ставлю из того, что лежит в $SRC_DIR"
+  else
+    warn "В $SRC_DIR незакоммиченные правки — ставлю как есть, без git pull"
+  fi
+fi
+
 say "Копирую код в ${APP_DIR}"
+[ -f "$SRC_DIR/deploy-excludes.txt" ] || die "Нет $SRC_DIR/deploy-excludes.txt — код скачан не полностью"
 mkdir -p "$APP_DIR"
-rsync -a --delete \
-  --exclude 'data' --exclude '.env' --exclude '.git' --exclude 'node_modules' \
-  "$SRC_DIR"/ "$APP_DIR"/
-mkdir -p "$APP_DIR/data/images"
+rsync -a --delete --exclude-from="$SRC_DIR/deploy-excludes.txt" "$SRC_DIR"/ "$APP_DIR"/
+mkdir -p "$APP_DIR/data/images" "$APP_DIR/backups"
 
 say "Ставлю зависимости"
-( cd "$APP_DIR" && { npm ci --omit=dev --silent || npm install --omit=dev --silent; } )
+( cd "$APP_DIR" && { npm ci --omit=dev --ignore-scripts --silent || npm install --omit=dev --ignore-scripts --silent; } )
 
 id -u tgshop >/dev/null 2>&1 || useradd --system --home /opt/shops --shell /usr/sbin/nologin tgshop
 chown -R tgshop:tgshop "$APP_DIR"
@@ -160,7 +182,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=${APP_DIR}/data
+ReadWritePaths=${APP_DIR}/data -${APP_DIR}/backups
 
 [Install]
 WantedBy=multi-user.target
@@ -202,5 +224,8 @@ cat <<EOF
     journalctl -u ${SERVICE} -f
   Первый магазин не тронут: сервис tg-shop, папка /opt/tg-shop.
   Ещё один бот:  bash add-bot.sh
+  Обновить все магазины разом, включая этот:  bash update.sh
 ════════════════════════════════════════════════
 EOF
+exit
+}

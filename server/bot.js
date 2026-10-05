@@ -532,6 +532,8 @@ function createBot(t) {
     start, stop, notifyManagers, sendToSubscribers, fill, normalize,
     handleUpdate, webhookSecret, shopWebAppUrl, sendWithFallback, menuButtonText,
     currentMode, syncCommands,
+    // экраны магазина в чате на произвольных настройках — для превью в админке
+    chatPreview: (s, sampleName) => shop.preview(s, sampleName),
   };
 }
 

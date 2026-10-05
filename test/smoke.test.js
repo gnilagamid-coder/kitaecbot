@@ -50,6 +50,12 @@ test.after(() => {
   fs.rmSync(DATA_DIR, { recursive: true, force: true });
 });
 
+test('healthz отвечает без запуска Telegram и базы', async () => {
+  const r = await api('/healthz');
+  assert.strictEqual(r.status, 200);
+  assert.deepStrictEqual(await r.json(), { ok: true });
+});
+
 test('витрина не отдаёт скрытые товары', async () => {
   const list = await (await api('/api/products')).json();
   assert.ok(list.find(p => p.id === 1), 'обычный товар должен быть');
@@ -137,6 +143,26 @@ test('статус оплаты без ключа не отдаётся', async 
 
 // Этот тест идёт последним намеренно: он блокирует 127.0.0.1 для админки,
 // и всё, что стояло бы после него, получало бы 429.
+test('превью чат-бота: только для админа, на присланных настройках', async () => {
+  const anon = await api('/api/admin/chatbot-preview', { method: 'POST', body: JSON.stringify({ settings: {} }) });
+  assert.ok([401, 403, 429].includes(anon.status), `без токена превью не отдаётся (статус ${anon.status})`);
+
+  const r = await admin('/api/admin/chatbot-preview', {
+    method: 'POST',
+    body: JSON.stringify({ settings: { chatbot: { buttons: { catalog: 'Витрина' } } } }),
+  });
+  assert.strictEqual(r.status, 200);
+  const p = await r.json();
+  assert.strictEqual(p.keyboard.keyboard[0][0].text, 'Витрина');
+  assert.ok(p.home && p.catalog && p.cart && p.help);
+
+  // превью ничего не сохраняет
+  const saved = await (await admin('/api/admin/settings')).json();
+  assert.notStrictEqual(saved.chatbot.buttons.catalog, 'Витрина');
+});
+
+// Перебор пароля ставит IP на паузу для всех запросов к админке — поэтому он
+// идёт последним из админских проверок.
 test('перебор пароля упирается в паузу', async () => {
   let sawLock = false;
   let status = 0;
@@ -156,3 +182,4 @@ test('перебор пароля упирается в паузу', async () =>
   const withGoodToken = await admin('/api/admin/stats');
   assert.strictEqual(withGoodToken.status, 429);
 });
+

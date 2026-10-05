@@ -44,6 +44,7 @@ function createTenant({
   store: givenStore = null,
 } = {}) {
   const store = givenStore || createStore(dataDir);
+  let settingsMemo = { v: null, value: null };
 
   const tenant = {
     id,
@@ -60,7 +61,16 @@ function createTenant({
 
     // Настройки всегда отдаются уже нормализованными: витрина и админка
     // про дефолты ничего не знают, за них отвечает settings.js.
-    settings: () => sanitize(store.read('settings', {})),
+    // Нормализация пересчитывается только после записи настроек: её зовут на
+    // каждом запросе и по нескольку раз на каждый апдейт бота. Результат общий
+    // для всех вызовов — его только читают, менять нельзя.
+    settings: () => {
+      const v = store.version ? store.version('settings') : null;
+      if (v !== null && settingsMemo.v === v) return settingsMemo.value;
+      const value = sanitize(store.read('settings', {}));
+      if (v !== null) settingsMemo = { v, value };
+      return value;
+    },
 
     // Сравнение токена без утечки времени. Сравниваем именно sha256-дайджесты:
     // timingSafeEqual требует равной длины буферов и бросает исключение при

@@ -326,17 +326,94 @@ async function systemStatus() {
 
 // Короткий отпечаток текущих настроек — им помечается отдаваемый index.html,
 // чтобы кэш клиента протухал ровно тогда, когда продавец что-то поменял.
-// Считается по «сырым» настройкам из хранилища: они лежат в памяти, так что
-// это просто хэш небольшой строки на каждый запрос страницы.
-let fpCacheSrc = null, fpCacheVal = '0';
+// Хэш содержимого (а не номер версии), чтобы ETag переживал перезапуск; но
+// пересчитывается он только после записи настроек, а не на каждый запрос.
+// Кэш свой у каждого магазина: в режиме платформы их в процессе много.
+const fpCache = new WeakMap(); // арендатор → { v, fp }
 function settingsFingerprint() {
-  const src = JSON.stringify(store.read('settings', {}));
-  if (src !== fpCacheSrc) {
-    fpCacheSrc = src;
-    fpCacheVal = crypto.createHash('sha1').update(src).digest('hex').slice(0, 10);
-  }
-  return fpCacheVal;
+  const t = currentTenant();
+  const v = t.store.version ? t.store.version('settings') : null;
+  const hit = fpCache.get(t);
+  if (v !== null && hit && hit.v === v) return hit.fp;
+  const fp = crypto.createHash('sha1').update(JSON.stringify(t.store.read('settings', {}))).digest('hex').slice(0, 10);
+  if (v !== null) fpCache.set(t, { v, fp });
+  return fp;
 }
+
+// ---------- сжатие и кэш ответов ----------
+// gzip и brotli идут через пул потоков zlib, а не синхронно: главный поток
+// в это время обслуживает остальных. Результат кэшируется, поэтому сжатие
+// случается один раз на версию файла или данных, а не на каждый запрос.
+const { promisify } = require('node:util');
+const gzipAsync = promisify(zlib.gzip);
+const brotliAsync = promisify(zlib.brotliCompress);
+
+function pickEncoding(req) {
+  const ae = String(req.headers['accept-encoding'] || '');
+  if (/\bbr\b/.test(ae)) return 'br';
+  if (/\bgzip\b/.test(ae)) return 'gzip';
+  return '';
+}
+
+// entry — { raw: Buffer }; сжатые варианты дописываются в него лениво.
+// Промис кладётся сразу: параллельные первые запросы ждут одно сжатие.
+function encodedBody(entry, enc) {
+  if (!enc) return Promise.resolve(entry.raw);
+  if (!entry[enc]) {
+    entry[enc] = (enc === 'br'
+      ? brotliAsync(entry.raw, { params: {
+        [zlib.constants.BROTLI_PARAM_QUALITY]: 9,
+        [zlib.constants.BROTLI_PARAM_SIZE_HINT]: entry.raw.length,
+      } })
+      : gzipAsync(entry.raw, { level: 9 })
+    ).catch(e => { console.error('[compress]', enc, e.message); entry[enc] = null; return null; });
+  }
+  return entry[enc].then(buf => buf || entry.raw);
+}
+
+// Готовые тексты статики: ключ — путь, размер, mtime и (для index.html)
+// отпечаток настроек. Потолок по числу записей: в режиме платформы у
+// каждого магазина своя витрина, и старые версии не должны копиться.
+const STATIC_CACHE_MAX = 64;
+const staticCache = new Map();
+
+function staticEntry(key, build) {
+  let entry = staticCache.get(key);
+  if (entry) return entry;
+  entry = { raw: null, ready: Promise.resolve().then(build).then(buf => { entry.raw = buf; return entry; }) };
+  entry.ready.catch(() => staticCache.delete(key));
+  staticCache.set(key, entry);
+  if (staticCache.size > STATIC_CACHE_MAX) staticCache.delete(staticCache.keys().next().value);
+  return entry;
+}
+
+// JSON публичного API, сжатый и закэшированный по версии данных. Заголовки
+// те же, что у json(): no-store — данные живые, кэшировать их клиенту нельзя.
+const apiCache = new WeakMap(); // арендатор → Map(ключ → { v, raw, gzip, br })
+async function sendCachedJson(req, res, key, v, build) {
+  const t = currentTenant();
+  let m = apiCache.get(t);
+  if (!m) apiCache.set(t, (m = new Map()));
+  let entry = m.get(key);
+  if (!entry || entry.v !== v) {
+    entry = { v, raw: Buffer.from(JSON.stringify(build()), 'utf8') };
+    m.set(key, entry);
+  }
+  // мелкий ответ сжимать дороже, чем отдать как есть
+  const enc = entry.raw.length > 1024 ? pickEncoding(req) : '';
+  const body = await encodedBody(entry, enc);
+  const h = {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': body.length,
+    'Cache-Control': 'no-store',
+    Vary: 'Accept-Encoding',
+  };
+  if (enc && body !== entry.raw) h['Content-Encoding'] = enc;
+  res.writeHead(200, h);
+  res.end(body);
+}
+
+const versionOf = key => (store.version ? store.version(key) : String(Date.now()));
 
 // На витрину не отдаём то, что клиенту знать незачем. Особенно creds платёжного
 // мерчанта: /api/settings открыт всем без авторизации, и утечь секрет там нельзя.
@@ -456,39 +533,33 @@ async function serveStatic(req, res, urlPath) {
       return res.end();
     }
 
-    // index.html отдаём с уже подставленной темой — единственный файл, который
-    // мы модифицируем на лету, поэтому он не стримится, а собирается в памяти
-    // (70 КБ, это ничего не стоит).
-    if (isIndex) {
-      const s = getSettings();
-      let html = await fsp.readFile(full, 'utf8');
-      // Название магазина подставляем в разметку, а не только скриптом: иначе
-      // и вкладка браузера, и шапка мини-аппа секунду показывают заглушку
-      // «SHOP», прежде чем приедет /api/settings.
-      html = html.replace('<title>SHOP</title>', `<title>${esc(s.brand.shopName)}</title>`);
-      html = html.replace('</head>', bootThemeCSS(s) + '</head>');
-      const buf = Buffer.from(html, 'utf8');
-      const h = { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-cache', ETag: etag };
-      if (/\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
-        h['Content-Encoding'] = 'gzip'; h['Vary'] = 'Accept-Encoding';
-        const gz = zlib.gzipSync(buf, { level: 6 });
-        res.writeHead(200, { ...h, 'Content-Length': gz.length });
-        return res.end(gz);
-      }
-      res.writeHead(200, { ...h, 'Content-Length': buf.length });
-      return res.end(buf);
-    }
-
     const headers = { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': cacheControl, ETag: etag };
 
-    // Текстовые файлы сжимаем: index.html — это ~70 КБ разметки со стилями и
-    // скриптом в одном файле, gzip срезает его примерно вчетверо. Картинки и
-    // шрифты не трогаем — они уже сжаты, повторное сжатие только греет процессор.
-    if (TEXTUAL.has(ext) && /\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
-      headers['Content-Encoding'] = 'gzip';
+    // Тексты (index.html со стилями и скриптом — это ~150 КБ, плюс общие
+    // скрипты) отдаём из памяти, уже сжатыми. Раньше index.html на каждый
+    // заход читался с диска и жался gzipSync прямо в главном потоке — ~8 мс
+    // CPU, в которые сервер не обслуживал никого. Теперь сборка и сжатие
+    // случаются один раз на версию файла и настроек; ключ кэша — тот же ETag.
+    // Картинки и шрифты не трогаем — они уже сжаты.
+    if (isIndex || TEXTUAL.has(ext)) {
+      const entry = await staticEntry(`${full}|${etag}`, async () => {
+        if (!isIndex) return fsp.readFile(full);
+        const s = getSettings();
+        let html = await fsp.readFile(full, 'utf8');
+        // Название магазина подставляем в разметку, а не только скриптом: иначе
+        // и вкладка браузера, и шапка мини-аппа секунду показывают заглушку
+        // «SHOP», прежде чем приедет /api/settings.
+        html = html.replace('<title>SHOP</title>', `<title>${esc(s.brand.shopName)}</title>`);
+        html = html.replace('</head>', bootThemeCSS(s) + '</head>');
+        return Buffer.from(html, 'utf8');
+      }).ready;
+      const enc = pickEncoding(req);
+      const body = await encodedBody(entry, enc);
+      if (enc && body !== entry.raw) headers['Content-Encoding'] = enc;
       headers['Vary'] = 'Accept-Encoding';
+      headers['Content-Length'] = body.length;
       res.writeHead(200, headers);
-      return fs.createReadStream(full).pipe(zlib.createGzip({ level: 6 })).pipe(res);
+      return res.end(body);
     }
 
     headers['Content-Length'] = stat.size;
@@ -507,18 +578,23 @@ async function handleApi(req, res, url) {
   const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
 
   // ===== публичное =====
+  // Оба ответа собираются и сжимаются один раз на версию данных: витрина
+  // запрашивает их при каждом открытии мини-аппа.
   if (p === '/api/settings' && method === 'GET') {
-    return json(res, 200, publicSettings(getSettings()));
+    return sendCachedJson(req, res, 'settings', versionOf('settings'), () => publicSettings(getSettings()));
   }
 
   if (p === '/api/products' && method === 'GET') {
-    const s = getSettings();
-    // Скрытые товары не отдаём вообще. Раньше их прятала только витрина, а сам
-    // список был публичным: название и цену неопубликованного товара можно было
-    // прочитать в /api/products, да и заказать его тоже.
-    let list = store.read('products', []).filter(x => !x.hidden);
-    if (s.catalog.hideSoldOut) list = list.filter(x => x.stock !== 0);
-    return json(res, 200, list);
+    // от настроек зависит hideSoldOut, поэтому версия — по обоим документам
+    return sendCachedJson(req, res, 'products', `${versionOf('products')}|${versionOf('settings')}`, () => {
+      const s = getSettings();
+      // Скрытые товары не отдаём вообще. Раньше их прятала только витрина, а сам
+      // список был публичным: название и цену неопубликованного товара можно было
+      // прочитать в /api/products, да и заказать его тоже.
+      let list = store.read('products', []).filter(x => !x.hidden);
+      if (s.catalog.hideSoldOut) list = list.filter(x => x.stock !== 0);
+      return list;
+    });
   }
 
   if (p === '/api/image' && method === 'GET') {
@@ -828,6 +904,15 @@ async function handleApi(req, res, url) {
         }
         return json(res, 200, next);
       }
+    }
+
+    // Превью магазина в чате для вкладки «Чат-бот». Экраны собирает тот же
+    // код, что отвечает покупателям, только на присланных (ещё не сохранённых)
+    // настройках — превью не может разойтись с тем, что увидит покупатель.
+    if (p === '/api/admin/chatbot-preview' && method === 'POST') {
+      let body; try { body = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
+      const s = sanitize(mergeDeep(store.read('settings', {}), (body && body.settings) || {}));
+      return json(res, 200, bot.chatPreview(s));
     }
 
     // Подписка магазина на платформу (Stage 5). Только режим платформы и
@@ -1634,6 +1719,11 @@ async function syncShopStatuses() {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
+    // Проверка живости для update.sh и мониторинга: отвечает раньше любого
+    // роутинга по арендаторам, не трогает ни Telegram, ни базу, ни диск.
+    if (url.pathname === '/healthz' && req.method === 'GET') {
+      return json(res, 200, { ok: true });
+    }
     if (MULTI) {
       // Голый домен — лендинг платформы и регистрация.
       if (isPlatformHost(req.headers.host)) {

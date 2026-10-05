@@ -43,24 +43,36 @@ async function createDbStore({ db, shopId, dataDir }) {
     return cache.has(key) ? cache.get(key) : fallback;
   }
 
+  // Версии и склейка записей — как в store.js: кэши выше пересобираются по
+  // версии, а серия записей одного документа даёт один UPSERT, а не десяток.
+  const queued = new Map();
+  const versions = new Map();
+  let generation = 0;
+  const version = key => `${generation}.${versions.get(key) || 0}`;
+
   function write(key, value) {
     cache.set(key, value);
+    versions.set(key, (versions.get(key) || 0) + 1);
+    if (queued.has(key)) return queued.get(key);
     // Очередь, как в store.js: параллельные сохранения не должны interleaved'ом
     // записывать один документ в два UPSERT с непредсказуемым порядком.
-    writeChain = writeChain.then(() =>
-      db.query(UPSERT, [shopId, String(key), JSON.stringify(value)])
-    ).catch(err => console.error('[store-db] write failed', key, err.message));
-    return writeChain;
+    const job = writeChain.then(() => {
+      queued.delete(key);
+      return db.query(UPSERT, [shopId, String(key), JSON.stringify(cache.get(key))]);
+    }).catch(err => console.error('[store-db] write failed', key, err.message));
+    queued.set(key, job);
+    writeChain = job;
+    return job;
   }
 
   const flush = () => writeChain;
 
   // Перечитать документы из БД. Нужно, если данные подменили снаружи
   // (миграция, ручная правка) — кэш в памяти перестаёт быть владельцем.
-  const reload = () => load();
+  const reload = async () => { await load(); generation++; };
 
   return {
-    read, write,
+    read, write, version,
     saveImage: files.saveImage,
     imagePath: files.imagePath,
     deleteImage: files.deleteImage,

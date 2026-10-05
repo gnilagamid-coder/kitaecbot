@@ -151,6 +151,36 @@ const DEFAULTS = {
     customerReceiptText: 'Спасибо, {name}! Заказ № {id} принят ✅\nСумма: {total}\nМенеджер свяжется с вами в ближайшее время.',
   },
 
+  // --- магазин прямо в чате бота (вкладка «Чат-бот» в админке) ---
+  // Тексты — обычный текст, эмодзи можно; разметка экранируется, чтобы
+  // случайная «<» не сломала сообщение у покупателя.
+  chatbot: {
+    // подписи постоянного меню под полем ввода
+    buttons: {
+      catalog: '🛍 Каталог',
+      search: '🔎 Поиск',
+      cart: '🛒 Корзина',
+      orders: '📦 Мои заказы',
+      manager: '💬 Менеджер',
+      help: '❓ Помощь',
+    },
+    // какие пункты показывать; корзина и заказы ещё зависят от режима продаж,
+    // «Менеджер» — от того, настроена ли связь
+    show: { search: true, cart: true, orders: true, manager: true, help: true },
+    placeholder: 'Выберите раздел в меню ниже',
+    homeText: '',           // пусто = подсказка по режиму продаж
+    showAppButton: true,    // «📱 Открыть в приложении» на главном экране
+    showSubscribe: true,    // «🔔 Сообщать о новинках» (если анонсы включены)
+    catalogTitle: '🛍 Каталог',
+    catalogHint: 'Выберите раздел 👇',
+    listHint: 'Нажмите на товар, чтобы увидеть фото и подробности 👇',
+    pageSize: 8,            // товаров на странице списка
+    cartEmptyText: 'Загляните в каталог — там есть из чего выбрать 👇',
+    inquirySentText: '✅ Сообщение передано менеджеру — он ответит вам здесь, в Telegram.\n\nА пока можно заглянуть в каталог 👇',
+    unknownText: 'Я отвечаю на кнопки меню 🙂 Выберите раздел внизу или отправьте /help',
+    helpGuide: true,        // дописывать в /help подсказку по кнопкам
+  },
+
   // --- профиль покупателя ---
   profile: {
     socialLinks: [],        // [{label, url}]
@@ -196,6 +226,32 @@ function mergeDeep(base, patch) {
     }
   }
   return out;
+}
+
+// Подпись кнопки меню: пустая или из одних пробелов — стандартная. Иначе
+// покупатель увидел бы пустую кнопку, а бот не узнал бы её нажатие.
+const label = (v, fb) => str(v, fb, 32).trim() || fb;
+
+function sanitizeChatbot(cb) {
+  const D = DEFAULTS.chatbot;
+  const btn = cb.buttons || {};
+  const show = cb.show || {};
+  return {
+    buttons: Object.fromEntries(Object.keys(D.buttons).map(k => [k, label(btn[k], D.buttons[k])])),
+    show: Object.fromEntries(Object.keys(D.show).map(k => [k, bool(show[k], D.show[k])])),
+    placeholder: str(cb.placeholder, D.placeholder, 64),
+    homeText: str(cb.homeText, D.homeText, 600),
+    showAppButton: bool(cb.showAppButton, D.showAppButton),
+    showSubscribe: bool(cb.showSubscribe, D.showSubscribe),
+    catalogTitle: label(cb.catalogTitle, D.catalogTitle),
+    catalogHint: str(cb.catalogHint, D.catalogHint, 200),
+    listHint: str(cb.listHint, D.listHint, 200),
+    pageSize: Math.round(num(cb.pageSize, D.pageSize, 4, 10)),
+    cartEmptyText: str(cb.cartEmptyText, D.cartEmptyText, 400),
+    inquirySentText: str(cb.inquirySentText, D.inquirySentText, 400),
+    unknownText: str(cb.unknownText, D.unknownText, 400),
+    helpGuide: bool(cb.helpGuide, D.helpGuide),
+  };
 }
 
 function sanitize(input) {
@@ -343,6 +399,7 @@ function sanitize(input) {
       notifyCustomer: bool(bt.notifyCustomer, true),
       customerReceiptText: str(bt.customerReceiptText, DEFAULTS.bot.customerReceiptText, 800),
     },
+    chatbot: sanitizeChatbot(s.chatbot || {}),
     profile: {
       socialLinks: (Array.isArray(pr.socialLinks) ? pr.socialLinks : [])
         .slice(0, 12)

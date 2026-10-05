@@ -421,3 +421,77 @@ test('помощники: обрезка без разрыва эмодзи и �
   assert.strictEqual(_internal.plural(21, 'товар', 'товара', 'товаров'), 'товар');
   assert.strictEqual(_internal.plural(12, 'товар', 'товара', 'товаров'), 'товаров');
 });
+
+// ---------- редактор чат-бота (вкладка «Чат-бот» в админке) ----------
+
+test('настройки chatbot: пустая подпись — стандартная, размер страницы в пределах', () => {
+  const { sanitize, DEFAULTS } = require('../server/settings');
+  const s = sanitize({ chatbot: { buttons: { catalog: '   ', search: 'Найти' }, pageSize: 99, show: { help: false } } });
+  assert.strictEqual(s.chatbot.buttons.catalog, DEFAULTS.chatbot.buttons.catalog, 'пустая подпись не превращается в пустую кнопку');
+  assert.strictEqual(s.chatbot.buttons.search, 'Найти');
+  assert.strictEqual(s.chatbot.pageSize, 10);
+  assert.strictEqual(s.chatbot.show.help, false);
+  assert.strictEqual(s.chatbot.show.search, true, 'не заданное — по умолчанию');
+});
+
+test('переименованные кнопки: меню, главный экран и старые подписи у покупателя', async () => {
+  const { shop } = makeShop({
+    chatbot: {
+      buttons: { catalog: '🧥 Мерч', cart: '🧺 Пакет' },
+      show: { search: false, help: false },
+      homeText: 'Лучшие <кружки> города',
+      pageSize: 4,
+    },
+  });
+  let mark = calls.length;
+  await say(shop, '/start');
+  const [welcome, home] = since(mark).filter(c => c.method === 'sendMessage');
+  const labels = buttons(welcome.body.reply_markup).map(b => b.text);
+  assert.deepStrictEqual(labels.slice(0, 2), ['🧥 Мерч', '🧺 Пакет']);
+  assert.ok(!labels.includes('🔎 Поиск') && !labels.includes('❓ Помощь'), 'выключенные пункты скрыты');
+  assert.match(home.body.text, /Лучшие &lt;кружки&gt; города/, 'текст продавца экранирован');
+  assert.ok(!hasButton(home.body.reply_markup, /Поиск/));
+
+  // новая подпись ведёт в каталог…
+  mark = calls.length;
+  await say(shop, '🧥 Мерч');
+  assert.match(lastOf(since(mark), 'sendMessage').body.text, /Каталог/);
+  // …и старая тоже: клавиатура у покупателя могла остаться прежней
+  mark = calls.length;
+  await say(shop, '🛍 Каталог');
+  assert.match(lastOf(since(mark), 'sendMessage').body.text, /Каталог/);
+});
+
+test('превью для админки собирается тем же кодом на несохранённых настройках', () => {
+  const { shop } = makeShop();
+  const { sanitize } = require('../server/settings');
+  const s = sanitize({ ...JSON.parse(fs.readFileSync(path.join(shop.store.DATA_DIR, 'settings.json'), 'utf8')), chatbot: { buttons: { catalog: 'Витрина' } } });
+  const p = shop.bot.chatPreview(s, 'Анна');
+  assert.strictEqual(p.keyboard.keyboard[0][0].text, 'Витрина');
+  assert.match(p.welcome, /Анна/);
+  assert.match(p.home.text, /Лавка/);
+  assert.ok(p.catalog.kb.length > 0);
+  assert.strictEqual(p.product.photo, 'img_mug.png', 'карточка с фото первого товара в наличии');
+  assert.match(p.cart.text, /Ваша корзина/, 'в корзине превью лежит товар');
+  assert.match(p.help.text, /Витрина — товары по разделам/);
+});
+
+test('file_id фото переживает перезапуск и сбрасывается при смене бота', async () => {
+  const { shop, dir } = makeShop();
+  await press(shop, 's:p:1001:a:0');
+  await shop.store.flush();
+
+  // тот же магазин после рестарта: фото уходит по file_id, без загрузки файла
+  let again = createTenant({ dataDir: dir, botToken: '777:test', adminToken: 'x', apiBase, publicUrl: '' });
+  let mark = calls.length;
+  await press(again, 's:p:1001:a:0');
+  let photo = lastOf(since(mark), 'sendPhoto');
+  assert.ok(photo && !photo.multipart && /^FILE_/.test(photo.body.photo), 'повторно файл не грузится');
+
+  // другой токен — старые file_id чужие, фото заливается заново
+  again = createTenant({ dataDir: dir, botToken: '888:other', adminToken: 'x', apiBase, publicUrl: '' });
+  mark = calls.length;
+  await press(again, 's:p:1001:a:0');
+  photo = lastOf(since(mark), 'sendPhoto');
+  assert.ok(photo.multipart, 'для нового бота фото загружено файлом');
+});

@@ -27,6 +27,14 @@ function createStore(dataDir) {
   // не порвали файл на середине.
   const cache = new Map();
   let writeChain = Promise.resolve();
+  // Ключи, запись которых уже стоит в очереди, но ещё не началась.
+  const queued = new Map();
+  // Версия документа меняется на каждой записи — по ней кэши выше (настройки,
+  // готовая витрина, сжатые ответы API) понимают, что пора пересобраться.
+  // Поколение растёт при reload(): данные подменили снаружи целиком.
+  const versions = new Map();
+  let generation = 0;
+  const version = key => `${generation}.${versions.get(key) || 0}`;
 
   const fileFor = key => path.join(DATA_DIR, `${key}.json`);
 
@@ -44,14 +52,23 @@ function createStore(dataDir) {
 
   function write(key, value) {
     cache.set(key, value);
+    versions.set(key, (versions.get(key) || 0) + 1);
+    // Записи одного ключа склеиваются: пока запись в очереди и не началась,
+    // новая её не дублирует — очередь сама возьмёт свежее значение из кэша.
+    // Сто просмотров товара подряд — это одна-две перезаписи views.json,
+    // а не сто. На диск всегда ложится последнее значение.
+    if (queued.has(key)) return queued.get(key);
     // атомарно: пишем во временный файл и переименовываем — при выключении питания
     // на середине записи старый файл остаётся целым
-    writeChain = writeChain.then(async () => {
+    const job = writeChain.then(async () => {
+      queued.delete(key);
       const tmp = fileFor(key) + '.tmp';
-      await fsp.writeFile(tmp, JSON.stringify(value, null, 2), 'utf8');
+      await fsp.writeFile(tmp, JSON.stringify(cache.get(key), null, 2), 'utf8');
       await fsp.rename(tmp, fileFor(key));
     }).catch(err => console.error('[store] write failed', key, err.message));
-    return writeChain;
+    queued.set(key, job);
+    writeChain = job;
+    return job;
   }
 
   async function saveImage(contentType, base64) {
@@ -79,9 +96,9 @@ function createStore(dataDir) {
 
   // Сброс кэша: следующий read() перечитает файл с диска. Нужно восстановлению
   // из бэкапа — файлы подменили снаружи, и кэш в памяти им больше не владелец.
-  const reload = () => cache.clear();
+  const reload = () => { cache.clear(); generation++; };
 
-  return { read, write, saveImage, imagePath, deleteImage, flush, reload, DATA_DIR, IMG_DIR };
+  return { read, write, version, saveImage, imagePath, deleteImage, flush, reload, DATA_DIR, IMG_DIR };
 }
 
 module.exports = { createStore };
