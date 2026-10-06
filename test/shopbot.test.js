@@ -148,6 +148,30 @@ test('/start: меню под полем ввода и главный экран
   assert.strictEqual(dataOf(sent[1].body.reply_markup, /Каталог/), 's:c');
 });
 
+test('диплинк /start p<id>: сразу карточка товара, скрытый — главный экран', async () => {
+  const { shop } = makeShop();
+  let mark = calls.length;
+  await say(shop, '/start p1002');
+  let list = since(mark);
+  assert.ok(hasButton(list[0].body.reply_markup, /Каталог/), 'меню под полем ввода всё равно ставится');
+  const card = lastOf(list, 'sendMessage');
+  assert.match(plain(card.body.text), /Тарелка/, 'открылась карточка, а не главный экран');
+  assert.ok(dataOf(card.body.reply_markup, /К списку/), 'кнопки карточки на месте');
+
+  // с фото — карточка уходит фотографией
+  mark = calls.length;
+  await say(shop, '/start p_1001');
+  assert.ok(since(mark).some(c => c.method === 'sendPhoto'), 'карточка с фото');
+
+  // скрытый и несуществующий — обычный главный экран
+  for (const payload of ['p1004', 'p999', 'мусор']) {
+    mark = calls.length;
+    await say(shop, `/start ${payload}`);
+    list = since(mark).filter(c => c.method === 'sendMessage');
+    assert.match(plain(list[list.length - 1].body.text), /Лавка/, payload);
+  }
+});
+
 test('каталог → раздел → карточка с фото → корзина → заказ с промокодом', async () => {
   const { shop } = makeShop();
 

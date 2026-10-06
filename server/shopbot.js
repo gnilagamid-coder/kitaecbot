@@ -1003,7 +1003,9 @@ function createShopBot(t, helpers) {
 
   // /start: приветствие продавца с меню под полем ввода, следом — главный
   // экран с кнопками (и мини-аппом, если он настроен).
-  async function welcome(chatId, name) {
+  // payload — хвост диплинка t.me/<бот>?start=p<id>: с сайта или из поста в
+  // канале человек попадает сразу в карточку товара, а не на главный экран.
+  async function welcome(chatId, name, payload = '') {
     const s = settings();
     const sess = loadSession(chatId);
     if (sess.step) { sess.step = null; saveSession(chatId, sess); }
@@ -1013,6 +1015,11 @@ function createShopBot(t, helpers) {
       parse_mode: 'HTML',
       reply_markup: mainKeyboard(s),
     });
+    const m = /^p_?(\d{1,16})$/.exec(String(payload || ''));
+    if (m && findProduct(m[1])) {
+      trackView(m[1]);
+      return send(chatId, productScreen(s, sess, Number(m[1]), 'a', 0));
+    }
     return send(chatId, homeScreen(s, sess, chatId));
   }
 
@@ -1026,7 +1033,7 @@ function createShopBot(t, helpers) {
     const cmd = text.startsWith('/') ? text.slice(1).split(/[\s@]/)[0].toLowerCase() : '';
     const arg = cmd ? text.slice(cmd.length + 1).replace(/^@\S+/, '').trim() : '';
 
-    if (cmd === 'start') { await welcome(chatId, name); return true; }
+    if (cmd === 'start') { await welcome(chatId, name, arg); return true; }
 
     let sess = loadSession(chatId);
 

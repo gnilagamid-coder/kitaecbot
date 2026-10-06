@@ -581,7 +581,10 @@ async function handleApi(req, res, url) {
   // Оба ответа собираются и сжимаются один раз на версию данных: витрина
   // запрашивает их при каждом открытии мини-аппа.
   if (p === '/api/settings' && method === 'GET') {
-    return sendCachedJson(req, res, 'settings', versionOf('settings'), () => publicSettings(getSettings()));
+    // имя бота узнаётся после getMe на старте — оно тоже часть версии ответа
+    const botUsername = currentTenant().botUsername || '';
+    return sendCachedJson(req, res, 'settings', `${versionOf('settings')}|${botUsername}`,
+      () => ({ ...publicSettings(getSettings()), botUsername }));
   }
 
   if (p === '/api/products' && method === 'GET') {

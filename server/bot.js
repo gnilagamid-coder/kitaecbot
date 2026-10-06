@@ -459,6 +459,8 @@ function createBot(t) {
       console.error(`${tag} не удалось авторизоваться:`, me.description);
       return;
     }
+    // Имя бота нужно наружу: сайт магазина строит по нему диплинки на товар
+    t.botUsername = me.result.username || t.botUsername || '';
     await syncCommands();
 
     // Кнопка меню слева от поля ввода — её же видно в превью чата. Без этого
