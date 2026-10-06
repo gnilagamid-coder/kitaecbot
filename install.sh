@@ -18,28 +18,38 @@ warn() { printf '\033[1;33m!  %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31mX  %s\033[0m\n' "$*" >&2; exit 1; }
 ask()  { local p="$1" d="${2:-}" a; printf '%s%s: ' "$p" "${d:+ [$d]}" >&2; read -r a; echo "${a:-$d}"; }
 
+# apt бывает занят автообновлениями (unattended-upgrades) — тогда ждём
+# блокировку до 5 минут, а не падаем посреди установки. Уже стоящие пакеты
+# не трогаем вовсе: на сервере с другими проектами nginx и certbot обычно есть.
+APT=(apt-get -o DPkg::Lock::Timeout=300)
+apt_ensure() {
+  local missing=() p
+  for p in "$@"; do dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p"); done
+  [ "${#missing[@]}" -eq 0 ] || "${APT[@]}" install -y -qq "${missing[@]}" >/dev/null
+}
+
 [ "$(id -u)" = "0" ] || die "Запусти от root:  sudo bash install.sh"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 say "Обновляю пакеты"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq curl ca-certificates gnupg rsync >/dev/null
+"${APT[@]}" update -qq
+apt_ensure curl ca-certificates gnupg rsync
 
 if ! command -v node >/dev/null 2>&1 || [ "$(node -v | cut -d. -f1 | tr -d v)" -lt 18 ]; then
   say "Ставлю Node.js ${NODE_MAJOR}"
   # На очень свежих релизах (Ubuntu 26.04) у NodeSource может ещё не быть
   # пакетов — тогда откатываемся на системный Node, он тоже >= 18.
   if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - >/dev/null \
-     && apt-get install -y -qq nodejs >/dev/null; then
+     && "${APT[@]}" install -y -qq nodejs >/dev/null; then
     :
   else
     warn "NodeSource недоступен — ставлю системный Node.js"
-    apt-get install -y -qq nodejs >/dev/null
+    "${APT[@]}" install -y -qq nodejs >/dev/null
   fi
 fi
 # Дистрибутивный nodejs идёт без npm (отдельный пакет), NodeSource — с npm.
-command -v npm >/dev/null 2>&1 || apt-get install -y -qq npm >/dev/null
+command -v npm >/dev/null 2>&1 || "${APT[@]}" install -y -qq npm >/dev/null
 say "Node $(node -v), npm $(npm -v)"
 
 # ---------- параметры ----------
@@ -105,7 +115,7 @@ ADMIN_CHAT_IDS="$OLD_ADMIN_CHAT_IDS"
 TLS_OK=0
 if [ -n "$DOMAIN" ]; then
   say "Настраиваю nginx для ${DOMAIN}"
-  apt-get install -y -qq nginx >/dev/null
+  apt_ensure nginx
   # На урезанных образах VPS каталогов nginx может не быть — без логов
   # nginx -t падает, а следом отказывается работать certbot.
   mkdir -p /var/log/nginx /var/lib/nginx
@@ -154,7 +164,7 @@ EOF
   systemctl restart nginx >/dev/null
 
   say "Выпускаю сертификат Let's Encrypt"
-  apt-get install -y -qq certbot python3-certbot-nginx >/dev/null
+  apt_ensure certbot python3-certbot-nginx
   if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email --redirect >/dev/null 2>&1; then
     echo "   сертификат выпущен"
     TLS_OK=1

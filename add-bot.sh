@@ -19,6 +19,16 @@ warn() { printf '\033[1;33m!  %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31mX  %s\033[0m\n' "$*" >&2; exit 1; }
 ask()  { local p="$1" d="${2:-}" a; printf '%s%s: ' "$p" "${d:+ [$d]}" >&2; read -r a; echo "${a:-$d}"; }
 
+# apt бывает занят автообновлениями (unattended-upgrades) — тогда ждём
+# блокировку до 5 минут, а не падаем посреди установки. Уже стоящие пакеты
+# не трогаем вовсе: на сервере с другими проектами nginx и certbot обычно есть.
+APT=(apt-get -o DPkg::Lock::Timeout=300)
+apt_ensure() {
+  local missing=() p
+  for p in "$@"; do dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p"); done
+  [ "${#missing[@]}" -eq 0 ] || "${APT[@]}" install -y -qq "${missing[@]}" >/dev/null
+}
+
 [ "$(id -u)" = "0" ] || die "Запусти от root:  sudo bash add-bot.sh"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 command -v node >/dev/null 2>&1 || die "Нет Node.js — сначала поставь первый магазин: bash install.sh"
@@ -85,7 +95,7 @@ chown -R tgshop:tgshop "$APP_DIR"
 
 # ---------- nginx + TLS ----------
 say "Настраиваю nginx для ${DOMAIN}"
-apt-get install -y -qq nginx >/dev/null
+apt_ensure nginx
 mkdir -p /var/log/nginx /var/lib/nginx
 systemctl enable --now nginx >/dev/null 2>&1 || true
 cat > "/etc/nginx/sites-available/${SERVICE}" <<EOF
@@ -125,7 +135,7 @@ nginx -t >/dev/null
 systemctl restart nginx >/dev/null
 
 say "Выпускаю сертификат Let's Encrypt"
-apt-get install -y -qq certbot python3-certbot-nginx >/dev/null
+apt_ensure certbot python3-certbot-nginx
 TLS_OK=0
 if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email --redirect >/dev/null 2>&1; then
   echo "   сертификат выпущен"
