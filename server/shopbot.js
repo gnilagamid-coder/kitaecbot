@@ -1270,7 +1270,11 @@ function createShopBot(t, helpers) {
     };
   }
 
-  return { handleMessage, handleCallback, ownsCallback, welcome, mainKeyboard, preview, KB };
+  // Текст с кнопки постоянного меню — для чужих пошаговых сценариев (owners.js):
+  // нажатие «Каталог» посреди них значит «передумал», а не ответ на вопрос.
+  const isMenuText = text => Boolean(navFromKeyboard(settings(), text));
+
+  return { handleMessage, handleCallback, ownsCallback, welcome, mainKeyboard, preview, isMenuText, KB };
 }
 
 // Команды для меню «/» в режиме магазина в чате.

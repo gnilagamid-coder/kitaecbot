@@ -26,6 +26,10 @@ const zlib = require('node:zlib');
 // Имя снимка — это его дата в UTC, заодно и сортировка по алфавиту = по времени.
 const NAME_RE = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/;
 const CONFIG_FILE = 'backup-config.json';
+// Не откатываются при восстановлении: настройки самих бэкапов и список
+// владельцев (доступ к админке). Снимок недельной давности не должен
+// вернуть права тому, кого с тех пор убрали.
+const KEEP_ON_RESTORE = new Set([CONFIG_FILE, 'admins.json']);
 
 const DEFAULTS = { enabled: false, intervalHours: 24, retention: 10 };
 
@@ -218,12 +222,12 @@ function createBackupManager({ dataDir, backupsRoot, tenantId = 'shop', store = 
     if (!v.ok) throw Object.assign(new Error(`снимок испорчен: ${v.bad.slice(0, 5).join(', ')}`), { status: 500 });
     if (store && typeof store.flush === 'function') await store.flush();
 
-    // JSON: снимаем всё, кроме конфига бэкапов, и кладём копии из снимка.
+    // JSON: снимаем всё, кроме конфига бэкапов и владельцев, и кладём копии из снимка.
     for (const e of await fsp.readdir(DATA_DIR)) {
-      if (!e.endsWith('.json') || e === CONFIG_FILE) continue;
+      if (!e.endsWith('.json') || KEEP_ON_RESTORE.has(e)) continue;
       await fsp.rm(path.join(DATA_DIR, e), { force: true });
     }
-    for (const f of m.files.filter(f => f.path.endsWith('.json'))) {
+    for (const f of m.files.filter(f => f.path.endsWith('.json') && !KEEP_ON_RESTORE.has(f.path))) {
       await fsp.copyFile(path.join(dir, f.path), path.join(DATA_DIR, f.path));
     }
     // Картинки: зеркалим папку images снимка — состояние откатывается целиком,

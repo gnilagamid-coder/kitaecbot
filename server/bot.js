@@ -12,6 +12,7 @@
 const crypto = require('node:crypto');
 const { esc } = require('./telegram');
 const { createShopBot, SHOP_COMMANDS } = require('./shopbot');
+const { createOwnerFlow } = require('./owners');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -59,6 +60,10 @@ const COMMANDS = [
   { command: 'admin', description: 'Панель управления (владелец)' },
 ];
 
+// Владельцам в меню «/» добавляется управление владельцами — меню ставится
+// на их чат отдельно (scope chat), покупатели этой команды не видят.
+const ownerCommands = base => [...base, { command: 'admins', description: 'Владельцы магазина' }];
+
 // ---------- экземпляр бота одного магазина ----------
 // t — арендатор: { id, store, telegram, settings(), publicUrl, adminToken, botMode }
 function createBot(t) {
@@ -68,8 +73,8 @@ function createBot(t) {
   // Префикс в логах: когда процесс ведёт несколько магазинов, без него
   // непонятно, чей бот ругается.
   const tag = t.id ? `[bot:${t.id}]` : '[bot]';
-  // Владелец ли пишет: доступ к админке строго по списку из .env.
-  const isAdminChat = id => Array.isArray(t.adminChatIds) && t.adminChatIds.includes(Number(id));
+  // Владелец ли пишет: ADMIN_CHAT_IDS из .env плюс добавленные через бота.
+  const isAdminChat = id => t.isOwner(id);
 
   let offset = 0;
   let running = false;
@@ -145,8 +150,50 @@ function createBot(t) {
   const classicFor = (s, chat) =>
     Boolean(s.bot.classicMenu) && (chat.type ? chat.type === 'private' : Number(chat.id) > 0);
 
+  // Кнопка админки: web_app — только в личке и только по https; иначе ссылка.
+  function adminButton(chatId) {
+    const adminUrl = t.publicUrl ? `${t.publicUrl}/admin.html` : '';
+    if (!adminUrl) return null;
+    return /^https:\/\//i.test(adminUrl) && Number(chatId) > 0
+      ? { text: '⚙️ Открыть панель', web_app: { url: adminUrl } }
+      : { text: '⚙️ Открыть панель', url: adminUrl };
+  }
+
+  // Владелец магазина в Telegram: пароль от админки → chat_id (см. owners.js).
+  const owners = createOwnerFlow(t, {
+    keyboardAfter: chatId => {
+      const s = settings();
+      return classicFor(s, { id: chatId }) ? shop.mainKeyboard(s) : { remove_keyboard: true };
+    },
+    isMenuText: text => shop.isMenuText(text),
+    adminButton,
+    syncChatCommands,
+  });
+
+  async function sendAdminPanel(chatId) {
+    if (!isAdminChat(chatId)) {
+      await tgApi('sendMessage', {
+        chat_id: chatId,
+        text: '⛔ Панель управления доступна только владельцу магазина.\n\n'
+          + 'Вы владелец? Отправьте /owner — бот попросит пароль от админки.',
+      });
+      return;
+    }
+    const button = adminButton(chatId);
+    if (!button) {
+      await tgApi('sendMessage', { chat_id: chatId, text: 'Админка ещё не настроена: нет PUBLIC_URL.' });
+      return;
+    }
+    await sendWithFallback({
+      chat_id: chatId,
+      text: 'Панель управления магазином — откроется прямо в Telegram.',
+      reply_markup: { inline_keyboard: [[button]] },
+    }, 'кнопка админки');
+  }
+
   async function handleUpdate(update) {
     if (update.callback_query) {
+      if (owners.ownsCallback(update.callback_query)) return owners.handleCallback(update.callback_query);
       if (shop.ownsCallback(update.callback_query)) return shop.handleCallback(update.callback_query);
       return handleCallback(update.callback_query);
     }
@@ -154,6 +201,13 @@ function createBot(t) {
     // нельзя принимать за ответ на шаг оформления.
     const msg = update.message || update.edited_message;
     if (!msg || !msg.chat) return;
+
+    // Владельцы и вход в панель работают даже при выключенном боте магазина:
+    // иначе включить его обратно из Telegram было бы нечем. Сценарий /owner
+    // идёт раньше магазина — шаг оформления заказа не должен съесть пароль.
+    if (update.message && await owners.handleMessage(msg)) return;
+    const firstWord = String(msg.text || '').trim().split(/\s/)[0];
+    if (update.message && /^\/admin(@\w+)?$/i.test(firstWord)) { await sendAdminPanel(msg.chat.id); return; }
 
     const s = settings();
     if (!s.bot.enabled) return;
@@ -212,31 +266,6 @@ function createBot(t) {
 
     if (text === '/id') {
       await tgApi('sendMessage', { chat_id: chatId, text: `Ваш chat_id: <code>${chatId}</code>`, parse_mode: 'HTML' });
-      return;
-    }
-
-    // Админка живёт в боте как Mini App. Команду видит любой, но кнопку
-    // получают только владельцы из ADMIN_CHAT_IDS — остальным вежливый отказ
-    // без подсказок о том, как устроена проверка.
-    if (text === '/admin') {
-      if (!isAdminChat(chatId)) {
-        await tgApi('sendMessage', { chat_id: chatId, text: '⛔ Панель управления доступна только владельцу магазина.' });
-        return;
-      }
-      const adminUrl = t.publicUrl ? `${t.publicUrl}/admin.html` : '';
-      if (!adminUrl) {
-        await tgApi('sendMessage', { chat_id: chatId, text: 'Админка ещё не настроена: нет PUBLIC_URL.' });
-        return;
-      }
-      // web_app — только в личке и только по https; иначе обычная ссылка
-      const button = /^https:\/\//i.test(adminUrl) && Number(chatId) > 0
-        ? { text: '⚙️ Открыть панель', web_app: { url: adminUrl } }
-        : { text: '⚙️ Открыть панель', url: adminUrl };
-      await sendWithFallback({
-        chat_id: chatId,
-        text: 'Панель управления магазином — откроется прямо в Telegram.',
-        reply_markup: { inline_keyboard: [[button]] },
-      }, 'кнопка админки');
       return;
     }
 
@@ -519,11 +548,28 @@ function createBot(t) {
   // Список команд в меню «/» зависит от того, включён ли магазин в чате.
   // Зовётся на старте и после сохранения настроек в админке — без
   // перезапуска сервиса.
+  const baseCommands = () => (settings().bot.classicMenu ? SHOP_COMMANDS : COMMANDS);
+
   async function syncCommands() {
     if (!BOT_TOKEN) return;
-    const commands = settings().bot.classicMenu ? SHOP_COMMANDS : COMMANDS;
-    const res = await tgApi('setMyCommands', { commands });
+    const res = await tgApi('setMyCommands', { commands: baseCommands() });
     if (!res.ok) console.warn(`${tag} setMyCommands не удался:`, res.description);
+    // у владельцев своё меню поверх общего — его тоже пересобираем
+    for (const id of t.owners.ids()) await syncChatCommands(id, true);
+  }
+
+  // Меню команд конкретного чата: владельцу — общее плюс /admins, бывшему
+  // владельцу — снимаем, и он видит общее. Чат, который ещё не писал боту,
+  // Telegram не знает («chat not found») — это не ошибка, меню встанет позже.
+  async function syncChatCommands(id, isOwner) {
+    if (!BOT_TOKEN || !(Number(id) > 0)) return;
+    const scope = { type: 'chat', chat_id: Number(id) };
+    const res = isOwner
+      ? await tgApi('setMyCommands', { commands: ownerCommands(baseCommands()), scope })
+      : await tgApi('deleteMyCommands', { scope });
+    if (res && !res.ok && !/chat not found/i.test(res.description || '')) {
+      console.warn(`${tag} меню команд для ${id} не обновилось:`, res.description);
+    }
   }
 
   const currentMode = () => mode;
@@ -531,7 +577,7 @@ function createBot(t) {
   return {
     start, stop, notifyManagers, sendToSubscribers, fill, normalize,
     handleUpdate, webhookSecret, shopWebAppUrl, sendWithFallback, menuButtonText,
-    currentMode, syncCommands,
+    currentMode, syncCommands, syncChatCommands,
     // экраны магазина в чате на произвольных настройках — для превью в админке
     chatPreview: (s, sampleName) => shop.preview(s, sampleName),
   };

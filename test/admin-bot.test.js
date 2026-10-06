@@ -54,6 +54,8 @@ const tgLogin = initData => api('/api/admin/tg-login', { method: 'POST', body: J
 test.before(async () => {
   fs.mkdirSync(path.join(DATA_DIR, 'images'), { recursive: true });
   fs.writeFileSync(path.join(DATA_DIR, 'products.json'), '[]');
+  // владелец, добавленный через бота (/owner + пароль), — не из .env
+  fs.writeFileSync(path.join(DATA_DIR, 'admins.json'), JSON.stringify({ owners: [{ id: 333, name: 'Компаньон' }] }));
 
   child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
     env: {
@@ -119,6 +121,26 @@ test('владелец из ADMIN_CHAT_IDS получает билет и вхо
 // Идёт до серии неудачных попыток: они копятся в общем authguard на IP,
 // и после пяти ошибок даже верный ADMIN_TOKEN ловил бы 429.
 test('ADMIN_TOKEN по-прежнему работает (регрессия)', async () => {
+  assert.strictEqual((await admin('/api/admin/stats')).status, 200);
+});
+
+// Тоже до серии неудач: в конце один честный 401 после отзыва доступа.
+test('владелец, добавленный через бота, входит; отзыв в панели закрывает вход сразу', async () => {
+  const login = await tgLogin(makeInitData({ id: 333, first_name: 'Компаньон' }));
+  assert.strictEqual(login.status, 200, 'владелец из admins.json проходит');
+  const ticket = (await login.json()).token;
+
+  const list = await (await admin('/api/admin/owners')).json();
+  assert.deepStrictEqual(list.owners.map(o => [o.id, o.source]), [[111, 'env'], [222, 'env'], [333, 'bot']]);
+
+  // базового из .env панель не убирает
+  assert.strictEqual((await admin('/api/admin/owners/111', { method: 'DELETE' })).status, 409);
+  assert.strictEqual((await admin('/api/admin/owners/333', { method: 'DELETE' })).status, 200);
+  assert.strictEqual((await admin('/api/admin/owners/333', { method: 'DELETE' })).status, 404);
+
+  // выданный раньше билет больше не действует
+  assert.strictEqual((await api('/api/admin/stats', { headers: { 'x-admin-token': ticket } })).status, 401);
+  // удачный вход сбрасывает счётчик authguard — тестам ниже он нужен с нуля
   assert.strictEqual((await admin('/api/admin/stats')).status, 200);
 });
 

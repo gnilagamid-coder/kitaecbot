@@ -18,6 +18,7 @@ const { createStore } = require('./store');
 const { createOrders } = require('./orders');
 const { createTelegram, DEFAULT_API_BASE } = require('./telegram');
 const { createBot } = require('./bot');
+const { createOwners } = require('./owners');
 const { sanitize } = require('./settings');
 
 function createTenant({
@@ -45,6 +46,8 @@ function createTenant({
 } = {}) {
   const store = givenStore || createStore(dataDir);
   let settingsMemo = { v: null, value: null };
+  // Владельцы: базовый список (.env / реестр) плюс добавленные через бота.
+  const owners = createOwners({ store, base: adminChatIds });
 
   const tenant = {
     id,
@@ -55,9 +58,12 @@ function createTenant({
     publicUrl: String(publicUrl || '').replace(/\/$/, ''),
     botMode,
     strictWebhook,
-    // Кому из телеграма открыта админка (chat_id владельцев). Пусто —
-    // входа из бота нет, остаётся только ADMIN_TOKEN.
-    adminChatIds,
+    // Кому из телеграма открыта админка (chat_id владельцев): ADMIN_CHAT_IDS
+    // плюс добавленные через бота (/owner + пароль). Пусто — входа из бота
+    // нет, остаётся только ADMIN_TOKEN.
+    owners,
+    isOwner: id => owners.has(id),
+    get adminChatIds() { return owners.ids(); },
 
     // Настройки всегда отдаются уже нормализованными: витрина и админка
     // про дефолты ничего не знают, за них отвечает settings.js.
@@ -80,6 +86,16 @@ function createTenant({
       ? Buffer.from(adminHash)
       : crypto.createHash('sha256').update(String(adminToken)).digest(),
     sessionKey: sessionKey || adminToken,
+
+    // Пароль от админки, присланный боту (сценарий /owner). Тот же дайджест,
+    // что у веб-входа; пустая строка не подходит никогда — иначе магазин без
+    // пароля пускал бы кого угодно.
+    checkAdminPassword(given) {
+      const s = String(given || '');
+      if (!s) return false;
+      const hash = crypto.createHash('sha256').update(s).digest();
+      return hash.length === tenant.adminHash.length && crypto.timingSafeEqual(hash, tenant.adminHash);
+    },
   };
 
   // Бот создаётся последним: ему нужен уже собранный арендатор, потому что

@@ -817,7 +817,7 @@ function buildPanel(id){
   if(id === 'payments')  return buildPayments();
   if(id === 'promo')     return buildPromo();
   if(id === 'notify')    return buildNotify();
-  if(id === 'bot'){ renderPanel('panel-bot', PANEL_BOT()); return buildBotToken(); }
+  if(id === 'bot'){ renderPanel('panel-bot', PANEL_BOT()); buildBotToken(); return buildOwners(); }
   if(id === 'chatbot')   return buildChatbot();
   if(id === 'channel')   return renderPanel('panel-channel', PANEL_CHANNEL());
   if(id === 'advanced')  return buildAdvanced();
@@ -1320,6 +1320,51 @@ async function testNotification(){
     out.style.color = 'var(--danger)';
     out.textContent = '✗ ' + e.message;
   }
+}
+
+// ---------- Владельцы в Telegram ----------
+// Кому бот открывает эту панель по /admin. Добавляют в самом боте (пароль →
+// chat_id), здесь — посмотреть и отозвать доступ, если пароль утёк.
+async function buildOwners(){
+  const panel = $('panel-bot');
+  if(!panel) return;
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `
+    <h2>Владельцы в Telegram</h2>
+    <div class="hint">Им бот открывает эту панель по команде <code>/admin</code>.
+      Добавить владельца: отправьте боту <code>/owner</code>, затем пароль от админки
+      (бот сразу удалит сообщение с ним) и chat_id нового владельца — или нажмите «👤 Это я».
+      В боте владельцы видят список командой <code>/admins</code>.</div>
+    <div id="ownersList"><div class="empty">Загружаю…</div></div>`;
+  panel.appendChild(card);
+
+  const box = card.querySelector('#ownersList');
+  let list;
+  try { list = (await api('/api/admin/owners')).owners || []; }
+  catch(e){ box.innerHTML = `<div class="empty">Не удалось загрузить: ${esc(e.message)}</div>`; return; }
+  if(!list.length){
+    box.innerHTML = '<div class="empty">Пока никого — вход только по паролю на этой странице</div>';
+    return;
+  }
+  box.innerHTML = list.map(o => `
+    <div class="rowitem" style="align-items:center">
+      <div style="flex:1;min-width:130px">
+        <b>${esc(o.name || 'без имени')}</b>${o.username ? ` <span class="sub" style="margin:0">@${esc(o.username)}</span>` : ''}
+        <div class="sub" style="margin:0">chat_id <code>${esc(String(o.id))}</code> · ${o.source === 'env'
+          ? 'из настроек сервера (ADMIN_CHAT_IDS в .env)'
+          : 'добавлен через бота' + (o.addedAt ? ' ' + new Date(o.addedAt).toLocaleString('ru-RU') : '')}</div>
+      </div>
+      ${o.source === 'env' ? '' : `<button type="button" class="ghost" data-owner-rm="${esc(String(o.id))}">Убрать</button>`}
+    </div>`).join('');
+  box.querySelectorAll('[data-owner-rm]').forEach(btn => btn.onclick = async () => {
+    const id = btn.dataset.ownerRm;
+    if(!await confirmDialog(`Закрыть доступ к панели для ${id}? Его вход из Telegram перестанет работать сразу.`, 'Убрать')) return;
+    try { await api('/api/admin/owners/' + encodeURIComponent(id), { method:'DELETE' }); toast('Доступ закрыт'); }
+    catch(e){ toast('Не удалось: ' + e.message, true); return; }
+    card.remove();
+    buildOwners();
+  });
 }
 
 // ---------- Бот ----------
@@ -2423,7 +2468,8 @@ $('saveBtn').onclick = saveSettings;
 $('previewReload').onclick = () => { $('previewFrame').contentWindow.location.reload(); };
 
 // Вход из Telegram: страница открыта как Mini App из бота, и initData
-// доказывает серверу, кто мы. Сервер пускает только chat_id из ADMIN_CHAT_IDS;
+// доказывает серверу, кто мы. Сервер пускает только владельцев (ADMIN_CHAT_IDS
+// и добавленные через бота командой /owner);
 // вместо вечного пароля получаем билет на 30 дней и кладём его в sessionStorage.
 async function tgAutoLogin(){
   const tg = window.Telegram && window.Telegram.WebApp;
@@ -2443,7 +2489,7 @@ async function tgAutoLogin(){
       return true;
     }
     $('loginErr').textContent = res.status === 401
-      ? 'Доступ запрещён: панель открыта только владельцу магазина (chat_id из ADMIN_CHAT_IDS).'
+      ? 'Доступ запрещён: панель открыта только владельцу магазина. Владелец? Отправьте боту /owner и пароль от админки.'
       : (d.error || 'Ошибка входа');
   }catch(e){
     $('loginErr').textContent = 'Сервер не отвечает';

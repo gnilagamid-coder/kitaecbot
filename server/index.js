@@ -189,7 +189,7 @@ function adminSessionOk(raw) {
   const [, uid, exp, sig] = m;
   if (Number(exp) < Date.now()) return false;
   // выпавших из списка допуска не пускаем даже с живой подписью
-  if (!currentTenant().adminChatIds.includes(Number(uid))) return false;
+  if (!currentTenant().isOwner(uid)) return false;
   const expected = crypto.createHmac('sha256', currentTenant().sessionKey).update(`a1.${uid}.${exp}`).digest('hex');
   const a = Buffer.from(expected, 'utf8');
   const b = Buffer.from(sig, 'utf8');
@@ -846,7 +846,8 @@ async function handleApi(req, res, url) {
 
   // Вход в админку из Telegram (Mini App, открытое из бота). Стоит ДО
   // токен-гейта: этот запрос сам и добывает себе пропуск. initData доказывает,
-  // что человек действительно из Telegram, а ADMIN_CHAT_IDS решает, владелец ли он.
+  // что человек действительно из Telegram, а список владельцев (ADMIN_CHAT_IDS
+  // плюс добавленные через бота командой /owner) решает, владелец ли он.
   // Ответ на «не тот» и «не из списка» одинаковый — перебором список не выяснить.
   if (p === '/api/admin/tg-login' && method === 'POST') {
     if (!rateLimit('admin:' + ip, 60, 60000)) return json(res, 429, { error: 'too many requests' });
@@ -858,7 +859,7 @@ async function handleApi(req, res, url) {
     }
     let body; try { body = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
     const user = validateInitData(String(body.initData || ''));
-    if (!user || !currentTenant().adminChatIds.includes(Number(user.id))) {
+    if (!user || !currentTenant().isOwner(user.id)) {
       authguard.fail(ip);
       return json(res, 401, { error: 'unauthorized' });
     }
@@ -913,6 +914,25 @@ async function handleApi(req, res, url) {
       let body; try { body = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
       const s = sanitize(mergeDeep(store.read('settings', {}), (body && body.settings) || {}));
       return json(res, 200, bot.chatPreview(s));
+    }
+
+    // Владельцы в Telegram: добавляют в боте (/owner + пароль + chat_id),
+    // здесь — список и отзыв доступа. Базовых из ADMIN_CHAT_IDS не трогаем.
+    if (p === '/api/admin/owners' && method === 'GET') {
+      return json(res, 200, { owners: currentTenant().owners.list() });
+    }
+    const ownerRm = /^\/api\/admin\/owners\/(\d+)$/.exec(p);
+    if (ownerRm && method === 'DELETE') {
+      const id = Number(ownerRm[1]);
+      const r = currentTenant().owners.remove(id);
+      if (!r.removed) {
+        return r.reason === 'env'
+          ? json(res, 409, { error: 'Этот владелец прописан в .env сервера (ADMIN_CHAT_IDS) — убрать можно только там' })
+          : json(res, 404, { error: 'Такого владельца нет' });
+      }
+      console.log(`[admin] владелец ${id} убран через панель`);
+      bot.syncChatCommands(id, false).catch(() => {});
+      return json(res, 200, { ok: true });
     }
 
     // Подписка магазина на платформу (Stage 5). Только режим платформы и
