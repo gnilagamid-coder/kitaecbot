@@ -125,14 +125,14 @@ server {
     listen 80;
     server_name ${DOMAIN};
 
-    # мини-апп открывается в мобильной сети: текст сжимаем, TLS-сессии
-    # переиспользуем — повторный вход в бота без полного рукопожатия
+    # мини-апп открывается в мобильной сети: текст сжимаем. Кэш TLS-сессий
+    # (повторный вход без полного рукопожатия) задаёт сам certbot в
+    # options-ssl-nginx.conf — свой ssl_session_cache здесь давал дубль, и
+    # certbot отказывался ставить сертификат.
     gzip on;
     gzip_comp_level 5;
     gzip_min_length 256;
     gzip_types text/css application/javascript application/json image/svg+xml;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
 
     # админка отдаёт токен в заголовке, а картинки могут быть тяжёлыми
     client_max_body_size 12m;

@@ -107,8 +107,8 @@ server {
     gzip_comp_level 5;
     gzip_min_length 256;
     gzip_types text/css application/javascript application/json image/svg+xml;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
+    # ssl_session_cache здесь не задаём: certbot вписывает свой
+    # (options-ssl-nginx.conf) и на дубле отказывается ставить сертификат.
 
     client_max_body_size 12m;
 
@@ -137,16 +137,29 @@ systemctl restart nginx >/dev/null
 say "Выпускаю сертификат Let's Encrypt"
 apt_ensure certbot python3-certbot-nginx
 TLS_OK=0
-if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email --redirect >/dev/null 2>&1; then
-  echo "   сертификат выпущен"
-  TLS_OK=1
-else
-  warn "Certbot не смог выпустить сертификат для ${DOMAIN}. Проверьте A-запись и повторите:"
-  warn "   certbot --nginx -d ${DOMAIN}"
-  warn "Затем поправьте ${APP_DIR}/.env: PUBLIC_URL=https://${DOMAIN}, BOT_MODE=webhook,"
-  warn "BOT_STRICT_WEBHOOK=1 и systemctl restart ${SERVICE}"
+# DuckDNS и прочие DNS расходятся не мгновенно: свежую A-запись проверка
+# Let's Encrypt может ещё не увидеть — даём три попытки с паузой.
+CERT_LOG="$(mktemp)"
+for attempt in 1 2 3; do
+  if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email --redirect >"$CERT_LOG" 2>&1; then
+    echo "   сертификат выпущен"
+    TLS_OK=1
+    break
+  fi
+  if [ "$attempt" -lt 3 ]; then warn "Certbot: попытка ${attempt} не удалась, повтор через 20 с"; sleep 20; fi
+done
+if [ "$TLS_OK" != "1" ]; then
+  # Сервиса и .env на этом шаге ещё нет — честно говорим, как убрать
+  # недоделанное и повторить, и показываем, что ответил certbot.
+  tail -n 12 "$CERT_LOG" | sed 's/^/   certbot: /'
+  rm -f "$CERT_LOG"
+  warn "Сертификат для ${DOMAIN} не выпущен. Частые причины: A-запись ещё не указывает"
+  warn "на этот сервер или закрыт порт 80. Убрать недоделанный магазин и повторить:"
+  warn "   rm -rf ${APP_DIR} /etc/nginx/sites-enabled/${SERVICE} /etc/nginx/sites-available/${SERVICE} \\"
+  warn "     && systemctl reload nginx && bash add-bot.sh"
   exit 1
 fi
+rm -f "$CERT_LOG"
 
 NGX_VER="$(nginx -v 2>&1 | sed -E 's|.*nginx/([0-9.]+).*|\1|')"
 if printf '%s\n%s\n' "1.25.1" "$NGX_VER" | sort -V | head -1 | grep -qx '1.25.1'; then
