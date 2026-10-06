@@ -44,10 +44,13 @@ DOMAIN="$(ask 'Домен (например shop2.example.com)' '')"
 ADMIN_TOKEN="$(ask 'Пароль в админку (Enter — сгенерировать)' '')"
 [ -n "$ADMIN_TOKEN" ] || ADMIN_TOKEN="$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 24)"
 
-# Порт подбираем сами: первый, который никто не слушает и который не записан
-# в .env другого магазина — остановленный магазин порт не слушает, но займёт
-# его снова при старте.
-TAKEN="$(sed -n 's/^PORT=//p' /opt/tg-shop/.env /opt/shops/*/.env 2>/dev/null | tr '\n' ' ')"
+# Порт подбираем сами: первый, который никто не слушает и который не занят
+# на бумаге — записан в .env другого магазина или в proxy_pass любого сайта
+# nginx. Остановленный сервис (магазин или чужой проект на этом же VPS) порт
+# не слушает, но займёт его снова при старте.
+TAKEN="$( { sed -n 's/^PORT=//p' /opt/tg-shop/.env /opt/shops/*/.env 2>/dev/null
+           grep -RhoE 'proxy_pass https?://(127\.0\.0\.1|localhost):[0-9]+' /etc/nginx/sites-enabled/ 2>/dev/null | grep -oE '[0-9]+$'
+         } | tr '\n' ' ')"
 PORT=3001
 while ss -tln | awk '{print $4}' | grep -qE ":${PORT}$" || [[ " $TAKEN " == *" $PORT "* ]]; do PORT=$((PORT + 1)); done
 
