@@ -330,6 +330,57 @@ function createBot(t) {
     });
   }
 
+  // Заявка с сайта магазина (отдельный сервис, см. /api/inbound-lead).
+  // Уходит админам бота — владельцам из /admins (ADMIN_CHAT_IDS и добавленные
+  // через /owner). Админов нет — получателям уведомлений о заказах, чтобы
+  // заявка не терялась.
+  const LEAD_TYPES = { buy: 'Купить', tradein: 'Trade-in', sell: 'Продать', repair: 'Ремонт' };
+  async function notifySiteLead(s, raw) {
+    const l = raw || {};
+    const one = (v, n) => String(v == null ? '' : v).replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, n);
+    const contact = one(l.contact, 120);
+    if (!l.test && !contact) return { ok: false, error: 'в заявке нет контакта' };
+    const name = one(l.name, 80);
+    const product = one(l.product, 160);
+    const price = one(l.price, 40);
+    const message = String(l.message == null ? '' : l.message).replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ').trim().slice(0, 1000);
+    const https = v => (/^https:\/\/[^\s"<>]+$/i.test(String(v || '')) ? String(v).slice(0, 400) : '');
+    const url = https(l.url);
+    const adminUrl = https(l.adminUrl);
+    const site = one(l.site, 80);
+    const user = /^@?([A-Za-z][A-Za-z0-9_]{4,31})$/.exec(contact);
+    const type = LEAD_TYPES[l.type] || 'Заявка';
+
+    const text = l.test
+      ? `🧪 <b>Проверка связи с сайтом</b>${site ? ` ${esc(site)}` : ''}\n\nЗаявки с формы на сайте будут приходить сюда.`
+      : `🌐 <b>Заявка с сайта · ${esc(type)}</b>\n\n`
+        + `Имя: ${esc(name || '—')}\n`
+        + `Контакт: ${user ? `<a href="https://t.me/${user[1]}">@${esc(user[1])}</a>` : `<code>${esc(contact)}</code>`}`
+        + (product ? `\nТовар: ${url ? `<a href="${esc(url)}">${esc(product)}</a>` : esc(product)}${price ? ` — ${esc(price)}` : ''}` : '')
+        + (message ? `\n\n${esc(message)}` : '')
+        + (site ? `\n\n<i>${esc(site)}</i>` : '');
+    const row = [];
+    if (user) row.push({ text: '💬 Написать клиенту', url: `https://t.me/${user[1]}` });
+    if (adminUrl) row.push({ text: 'Все заявки', url: adminUrl });
+
+    let ids = t.owners.ids().filter(id => id > 0);
+    let to = 'admins';
+    if (!ids.length) { ids = s.notify.enabled ? (s.notify.chatIds || []).filter(Boolean) : []; to = 'managers'; }
+    if (!ids.length) return { ok: false, sent: 0, total: 0, error: 'у бота нет админов: добавьте себя командой /owner' };
+
+    let sent = 0;
+    for (const id of ids) {
+      const res = await tgApi('sendMessage', {
+        chat_id: id, text, parse_mode: 'HTML', disable_web_page_preview: true,
+        disable_notification: Boolean(s.notify.silent),
+        reply_markup: row.length ? { inline_keyboard: [row] } : undefined,
+      });
+      if (res.ok) sent++;
+      else console.warn(`${tag} заявка с сайта не дошла до ${id}: ${res.description}`);
+    }
+    return { ok: sent > 0, sent, total: ids.length, to };
+  }
+
   async function notifyManagers(s, text) {
     const appUrl = shopWebAppUrl(s);
     let failed = 0;
@@ -577,7 +628,7 @@ function createBot(t) {
   const currentMode = () => mode;
 
   return {
-    start, stop, notifyManagers, sendToSubscribers, fill, normalize,
+    start, stop, notifyManagers, notifySiteLead, sendToSubscribers, fill, normalize,
     handleUpdate, webhookSecret, shopWebAppUrl, sendWithFallback, menuButtonText,
     currentMode, syncCommands, syncChatCommands,
     // экраны магазина в чате на произвольных настройках — для превью в админке

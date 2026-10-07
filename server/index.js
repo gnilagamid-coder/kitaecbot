@@ -48,6 +48,9 @@ const MULTI = String(process.env.MULTITENANT || '').trim() === '1';
 const MULTI_DOMAIN = String(process.env.MULTITENANT_DOMAIN || '').toLowerCase().trim();
 const MULTI_ROOT = process.env.MULTITENANT_DATA_ROOT || path.join(process.cwd(), 'data', 'shops');
 const SECRET_KEY = process.env.SECRET_KEY || '';
+// Общий ключ с сайтом магазина: по нему сайт присылает боту заявки с формы.
+// Пусто — приём заявок выключен (эндпоинт отвечает 404).
+const SITE_LEAD_TOKEN = String(process.env.SITE_LEAD_TOKEN || '').trim();
 
 if (!MULTI && !ADMIN_TOKEN) {
   console.error('ADMIN_TOKEN не задан в .env — админка была бы открыта всем. Выхожу.');
@@ -852,6 +855,26 @@ async function handleApi(req, res, url) {
   // что человек действительно из Telegram, а список владельцев (ADMIN_CHAT_IDS
   // плюс добавленные через бота командой /owner) решает, владелец ли он.
   // Ответ на «не тот» и «не из списка» одинаковый — перебором список не выяснить.
+  // Заявка с формы на сайте магазина. Сайт — отдельный сервис, ходит сюда по
+  // внутреннему адресу, но через nginx эндпоинт виден и снаружи, поэтому без
+  // общего ключа (X-Site-Token = SITE_LEAD_TOKEN) — отказ, а перебор ключа
+  // упирается в тот же тормоз, что и вход в админку.
+  if (p === '/api/inbound-lead' && method === 'POST') {
+    if (!SITE_LEAD_TOKEN || MULTI) return json(res, 404, { error: 'not found' });
+    const gate = authguard.check(ip);
+    if (!gate.allowed) return json(res, 429, { error: 'too many attempts' });
+    const given = crypto.createHash('sha256').update(String(req.headers['x-site-token'] || '')).digest();
+    const want = crypto.createHash('sha256').update(SITE_LEAD_TOKEN).digest();
+    if (!crypto.timingSafeEqual(given, want)) {
+      authguard.fail(ip);
+      return json(res, 401, { error: 'unauthorized' });
+    }
+    if (!rateLimit('site-lead:' + ip, 60, 60000)) return json(res, 429, { error: 'too many requests' });
+    let body; try { body = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
+    const r = await bot.notifySiteLead(getSettings(), body);
+    return json(res, r.ok ? 200 : 502, r);
+  }
+
   if (p === '/api/admin/tg-login' && method === 'POST') {
     if (!rateLimit('admin:' + ip, 60, 60000)) return json(res, 429, { error: 'too many requests' });
     const gate = authguard.check(ip);
