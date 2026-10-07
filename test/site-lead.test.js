@@ -103,7 +103,27 @@ test('заявка уходит админам бота, с кнопками и 
   assert.match(m.text, /<a href="https:\/\/t\.me\/oleg_buyer">@oleg_buyer<\/a>/);
   assert.match(m.text, /<a href="https:\/\/site\.example\/p\/iphone-15-pro-t1">iPhone 15 Pro<\/a> — 104 990 ₽/);
   assert.match(m.text, /Сдам 13 Pro\nв хорошем состоянии/, 'переносы в сообщении сохранены');
-  assert.deepStrictEqual(m.reply_markup.inline_keyboard[0].map(b => b.text), ['💬 Написать клиенту', 'Все заявки']);
+  assert.deepStrictEqual(m.reply_markup.inline_keyboard.map(r => r.map(b => b.text)), [['💬 Написать клиенту'], ['Все заявки на сайте']]);
+});
+
+test('проверенный телефон: кликабельный номер со страной, кнопки Telegram и WhatsApp', async () => {
+  const mark = calls.length;
+  const d = await (await lead({
+    type: 'buy', contact: '+7 (916) 123-45-67', contactType: 'phone', phone: '+79161234567', country: 'Россия, мобильный',
+  })).json();
+  assert.strictEqual(d.ok, true);
+  const m = sentSince(mark)[0].body;
+  assert.match(m.text, /Телефон: \+79161234567 · Россия, мобильный/);
+  assert.deepStrictEqual(m.reply_markup.inline_keyboard[0], [
+    { text: '💬 Telegram', url: 'https://t.me/+79161234567' },
+    { text: '🟢 WhatsApp', url: 'https://wa.me/79161234567' },
+  ]);
+  // кривой «телефон» в обход сайта — без кнопок, просто текстом
+  const mark2 = calls.length;
+  await lead({ contact: 'ул. Ленина', phone: '+7 abc' });
+  const m2 = sentSince(mark2)[0].body;
+  assert.match(m2.text, /Контакт: <code>ул\. Ленина<\/code>/);
+  assert.strictEqual(m2.reply_markup, undefined);
 });
 
 test('проверка связи и пустая заявка', async () => {
@@ -121,8 +141,8 @@ test('админов нет — заявка уходит получателям
   assert.deepStrictEqual([d.ok, d.to], [true, 'managers']);
   const sent = sentSince(mark);
   assert.deepStrictEqual(sent.map(c => String(c.body.chat_id)).sort(), ['-100200', '555']);
-  assert.match(sent[0].body.text, /<code>\+7 999 000-00-00<\/code>/, 'телефон — моноширинным, удобно копировать');
-  assert.strictEqual(sent[0].body.reply_markup, undefined, 'без username кнопки «написать» нет');
+  assert.match(sent[0].body.text, /Контакт: <code>\+7 999 000-00-00<\/code>/, 'непроверенный номер — моноширинным, как есть');
+  assert.strictEqual(sent[0].body.reply_markup, undefined, 'без ника и проверенного номера кнопок нет');
 });
 
 test('ни админов, ни получателей — честная ошибка, а не тишина', async () => {

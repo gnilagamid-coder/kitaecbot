@@ -349,19 +349,31 @@ function createBot(t) {
     const adminUrl = https(l.adminUrl);
     const site = one(l.site, 80);
     const user = /^@?([A-Za-z][A-Za-z0-9_]{4,31})$/.exec(contact);
+    // сайт присылает проверенный номер в международном виде: его Telegram
+    // делает кликабельным, а кнопки открывают клиента в Telegram и WhatsApp
+    const phone = /^\+\d{8,15}$/.test(String(l.phone || '')) ? String(l.phone) : '';
+    const country = one(l.country, 60);
     const type = LEAD_TYPES[l.type] || 'Заявка';
 
     const text = l.test
       ? `🧪 <b>Проверка связи с сайтом</b>${site ? ` ${esc(site)}` : ''}\n\nЗаявки с формы на сайте будут приходить сюда.`
       : `🌐 <b>Заявка с сайта · ${esc(type)}</b>\n\n`
         + `Имя: ${esc(name || '—')}\n`
-        + `Контакт: ${user ? `<a href="https://t.me/${user[1]}">@${esc(user[1])}</a>` : `<code>${esc(contact)}</code>`}`
+        + (user ? `Telegram: <a href="https://t.me/${user[1]}">@${esc(user[1])}</a>`
+          : phone ? `Телефон: ${phone}${country ? ` · ${esc(country)}` : ''}`
+            : `Контакт: <code>${esc(contact)}</code>`)
         + (product ? `\nТовар: ${url ? `<a href="${esc(url)}">${esc(product)}</a>` : esc(product)}${price ? ` — ${esc(price)}` : ''}` : '')
         + (message ? `\n\n${esc(message)}` : '')
         + (site ? `\n\n<i>${esc(site)}</i>` : '');
-    const row = [];
-    if (user) row.push({ text: '💬 Написать клиенту', url: `https://t.me/${user[1]}` });
-    if (adminUrl) row.push({ text: 'Все заявки', url: adminUrl });
+    const kb = [];
+    if (user) kb.push([{ text: '💬 Написать клиенту', url: `https://t.me/${user[1]}` }]);
+    else if (phone) {
+      kb.push([
+        { text: '💬 Telegram', url: `https://t.me/${phone}` },
+        { text: '🟢 WhatsApp', url: `https://wa.me/${phone.slice(1)}` },
+      ]);
+    }
+    if (adminUrl) kb.push([{ text: 'Все заявки на сайте', url: adminUrl }]);
 
     let ids = t.owners.ids().filter(id => id > 0);
     let to = 'admins';
@@ -373,7 +385,7 @@ function createBot(t) {
       const res = await tgApi('sendMessage', {
         chat_id: id, text, parse_mode: 'HTML', disable_web_page_preview: true,
         disable_notification: Boolean(s.notify.silent),
-        reply_markup: row.length ? { inline_keyboard: [row] } : undefined,
+        reply_markup: kb.length ? { inline_keyboard: kb } : undefined,
       });
       if (res.ok) sent++;
       else console.warn(`${tag} заявка с сайта не дошла до ${id}: ${res.description}`);
