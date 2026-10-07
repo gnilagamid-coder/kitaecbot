@@ -334,7 +334,7 @@ function createBot(t) {
   // Уходит админам бота — владельцам из /admins (ADMIN_CHAT_IDS и добавленные
   // через /owner). Админов нет — получателям уведомлений о заказах, чтобы
   // заявка не терялась.
-  const LEAD_TYPES = { buy: 'Купить', tradein: 'Trade-in', sell: 'Продать', repair: 'Ремонт' };
+  const LEAD_TYPES = { buy: 'Купить', tradein: 'Trade-in', sell: 'Продать', repair: 'Ремонт', booking: 'Бронь', notify: 'Сообщить о поступлении' };
   async function notifySiteLead(s, raw) {
     const l = raw || {};
     const one = (v, n) => String(v == null ? '' : v).replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, n);

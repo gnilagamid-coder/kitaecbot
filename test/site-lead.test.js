@@ -126,6 +126,19 @@ test('проверенный телефон: кликабельный номер
   assert.strictEqual(m2.reply_markup, undefined);
 });
 
+test('бронь комплектации и «сообщить о поступлении» — свои подписи', async () => {
+  const mark = calls.length;
+  await lead({
+    type: 'booking', contact: '@oleg_buyer', product: 'iPhone 18 Pro Max 256 ГБ бордовый nano + eSIM', price: '164 990 ₽',
+    url: 'https://site.example/iphone/18-pro-max/burgundy-256-nano-esim',
+  });
+  await lead({ type: 'notify', contact: '@oleg_buyer', product: 'iPhone 18 Pro Max 1 ТБ Glacier eSIM' });
+  const [b, n] = sentSince(mark).map(c => c.body.text);
+  assert.match(b, /Заявка с сайта · Бронь/);
+  assert.match(b, /<a href="https:\/\/site\.example\/iphone\/18-pro-max\/burgundy-256-nano-esim">iPhone 18 Pro Max 256 ГБ бордовый nano \+ eSIM<\/a> — 164 990 ₽/);
+  assert.match(n, /Заявка с сайта · Сообщить о поступлении/);
+});
+
 test('проверка связи и пустая заявка', async () => {
   const mark = calls.length;
   const t = await (await lead({ test: true, site: 'site.example' })).json();
