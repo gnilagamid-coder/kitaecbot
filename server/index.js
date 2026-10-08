@@ -51,6 +51,11 @@ const SECRET_KEY = process.env.SECRET_KEY || '';
 // Общий ключ с сайтом магазина: по нему сайт присылает боту заявки с формы.
 // Пусто — приём заявок выключен (эндпоинт отвечает 404).
 const SITE_LEAD_TOKEN = String(process.env.SITE_LEAD_TOKEN || '').trim();
+// Сайт магазина (https), если витрина живёт там: тогда «Открыть магазин» и
+// кнопка меню открывают сайт, «Открыть панель» — его админку, а свой каталог
+// бота в чате не показывается — витрина одна.
+const SITE_URL = /^https:\/\/[^\s/]+/i.test(String(process.env.SITE_URL || '').trim())
+  ? String(process.env.SITE_URL).trim().replace(/\/+$/, '') : '';
 
 if (!MULTI && !ADMIN_TOKEN) {
   console.error('ADMIN_TOKEN не задан в .env — админка была бы открыта всем. Выхожу.');
@@ -90,6 +95,7 @@ if (!MULTI) {
     // BOT_STRICT_WEBHOOK=1 вместе с HTTPS) — запрет отката читаем и здесь.
     strictWebhook: String(process.env.BOT_STRICT_WEBHOOK || '') === '1',
     adminChatIds: ADMIN_CHAT_IDS,
+    siteUrl: SITE_URL,
   });
 
   // Резервные копии папки данных: снимки по расписанию и вручную из админки.
@@ -873,6 +879,31 @@ async function handleApi(req, res, url) {
     let body; try { body = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
     const r = await bot.notifySiteLead(getSettings(), body);
     return json(res, r.ok ? 200 : 502, r);
+  }
+
+  // Сайт магазина спрашивает: этот initData — от владельца? Сайт пускает в свою
+  // админку по ответу бота, поэтому токен бота и список владельцев остаются
+  // здесь. Ключ тот же, что у заявок. Неверный ключ — тормоз подбора; неверный
+  // initData — просто отказ: запросы идут с адреса сайта, и чужие попытки не
+  // должны запереть сайту приём заявок. Тормоз по посетителю держит сайт.
+  if (p === '/api/site/tg-auth' && method === 'POST') {
+    if (!SITE_LEAD_TOKEN || MULTI) return json(res, 404, { error: 'not found' });
+    const gate = authguard.check(ip);
+    if (!gate.allowed) return json(res, 429, { error: 'too many attempts' });
+    const given = crypto.createHash('sha256').update(String(req.headers['x-site-token'] || '')).digest();
+    const want = crypto.createHash('sha256').update(SITE_LEAD_TOKEN).digest();
+    if (!crypto.timingSafeEqual(given, want)) {
+      authguard.fail(ip);
+      return json(res, 401, { error: 'unauthorized' });
+    }
+    if (!rateLimit('site-auth:' + ip, 120, 60000)) return json(res, 429, { error: 'too many requests' });
+    let body; try { body = await readBody(req); } catch (e) { return json(res, 400, { error: 'bad json' }); }
+    const user = validateInitData(String(body.initData || ''));
+    if (!user || !currentTenant().isOwner(user.id)) return json(res, 403, { ok: false, error: 'not an owner' });
+    return json(res, 200, {
+      ok: true,
+      user: { id: user.id, name: [user.first_name, user.last_name].filter(Boolean).join(' '), username: user.username || '' },
+    });
   }
 
   if (p === '/api/admin/tg-login' && method === 'POST') {

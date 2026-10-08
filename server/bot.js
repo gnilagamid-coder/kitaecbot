@@ -89,6 +89,8 @@ function createBot(t) {
   // домен должен быть привязан к боту в @BotFather (/setdomain), иначе клиент
   // откатится на открытие в браузере. t.me-ссылка от этого не страдает.
   function shopWebAppUrl(s) {
+    // Витрина — внешний сайт магазина (SITE_URL): он и есть мини-апп.
+    if (t.siteUrl) return t.siteUrl;
     const link = String(s.channel.miniAppLink || '').trim();
     // Прямая ссылка мини-аппа — это https://t.me/<бот>/<appname>; голая ссылка
     // на бота мини-аппом не является и в web_app не принимается.
@@ -147,12 +149,15 @@ function createBot(t) {
 
   // Кнопочный магазин включается настройкой bot.classicMenu и работает только
   // в личке: в группах обычная клавиатура и пошаговая форма мешали бы всем.
+  // При внешнем сайте-витрине кнопочного магазина нет: его каталог — свой,
+  // ботовый, и разошёлся бы с сайтом. Покупатель открывает сайт.
   const classicFor = (s, chat) =>
-    Boolean(s.bot.classicMenu) && (chat.type ? chat.type === 'private' : Number(chat.id) > 0);
+    !t.siteUrl && Boolean(s.bot.classicMenu) && (chat.type ? chat.type === 'private' : Number(chat.id) > 0);
 
   // Кнопка админки: web_app — только в личке и только по https; иначе ссылка.
+  // С внешним сайтом панель — его админка: туда пускает та же подпись initData.
   function adminButton(chatId) {
-    const adminUrl = t.publicUrl ? `${t.publicUrl}/admin.html` : '';
+    const adminUrl = t.siteUrl ? `${t.siteUrl}/admin` : t.publicUrl ? `${t.publicUrl}/admin.html` : '';
     if (!adminUrl) return null;
     return /^https:\/\//i.test(adminUrl) && Number(chatId) > 0
       ? { text: '⚙️ Открыть панель', web_app: { url: adminUrl } }
@@ -228,6 +233,19 @@ function createBot(t) {
     }
 
     if (classicFor(s, msg.chat) && update.message && await shop.handleMessage(msg, { name })) return;
+
+    // Витрина переехала на сайт, а у покупателя осталась клавиатура кнопочного
+    // магазина: убираем её и даём кнопку сайта.
+    if (t.siteUrl && update.message && Number(chatId) > 0 && shop.isMenuText(text)) {
+      await tgApi('sendMessage', { chat_id: chatId, text: 'Каталог, цены и бронь теперь в приложении магазина 👇', reply_markup: { remove_keyboard: true } });
+      await sendWithFallback({
+        chat_id: chatId,
+        text: `🛍 ${esc(s.brand.shopName)}`,
+        parse_mode: 'HTML',
+        reply_markup: menuKeyboard(s, chatId),
+      }, 'кнопка сайта');
+      return;
+    }
 
     if (text === '/start' || text.startsWith('/start ')) {
       // подписка на анонсы строго опциональна: в приветствии показываем кнопку

@@ -33,6 +33,8 @@ function createTenant({
   // у магазинов платформы — хэш пароля (свой у каждого, стабильный).
   sessionKey = '',
   publicUrl = '',
+  // Внешний сайт-витрина (SITE_URL в index.js). Пусто — витрина своя.
+  siteUrl = '',
   apiBase = DEFAULT_API_BASE,
   botMode = 'polling',
   // Запрет отката на long polling при неудачном setWebhook. Нужен, когда
@@ -56,6 +58,7 @@ function createTenant({
     telegram: createTelegram({ botToken, apiBase }),
     adminToken,
     publicUrl: String(publicUrl || '').replace(/\/$/, ''),
+    siteUrl: String(siteUrl || '').replace(/\/+$/, ''),
     botMode,
     strictWebhook,
     // Кому из телеграма открыта админка (chat_id владельцев): ADMIN_CHAT_IDS
