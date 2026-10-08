@@ -101,23 +101,31 @@ function createSiteSync(t, { siteUrl, apiUrl = siteUrl, token, intervalMs = 6000
     return { changed: true, count: products.length };
   }
 
-  // Один проход за раз: медленный сайт не наслаивает обновления друг на друга
+  // Один проход за раз: медленный сайт не наслаивает обновления друг на друга.
+  // Позвали посреди прохода — значит, на сайте что-то поменялось уже после его
+  // начала: пройдём ещё раз сразу следом.
+  let again = false;
   function sync() {
-    if (!busy) {
-      busy = syncOnce().then(r => {
-        if (r.changed) console.log(`${tag} каталог с сайта: ${r.count} ${r.count === 1 ? 'товар' : 'товаров'}`);
-        if (failing) console.log(`${tag} связь с сайтом восстановлена`);
-        failing = false;
-        last = { at: Date.now(), count: r.changed ? r.count : last.count, error: '' };
-        return r;
-      }).catch(e => {
-        // ошибку пишем один раз за серию, а не каждую минуту
-        if (!failing) console.warn(`${tag} каталог с сайта не обновлён: ${e.message}`);
-        failing = true;
-        last = { ...last, error: e.message };
-        return { changed: false, error: e.message };
-      }).finally(() => { busy = null; });
+    if (busy) {
+      again = true;
+      return busy;
     }
+    busy = syncOnce().then(r => {
+      if (r.changed) console.log(`${tag} каталог с сайта: ${r.count} ${r.count === 1 ? 'товар' : 'товаров'}`);
+      if (failing) console.log(`${tag} связь с сайтом восстановлена`);
+      failing = false;
+      last = { at: Date.now(), count: r.changed ? r.count : last.count, error: '' };
+      return r;
+    }).catch(e => {
+      // ошибку пишем один раз за серию, а не каждую минуту
+      if (!failing) console.warn(`${tag} каталог с сайта не обновлён: ${e.message}`);
+      failing = true;
+      last = { ...last, error: e.message };
+      return { changed: false, error: e.message };
+    }).finally(() => {
+      busy = null;
+      if (again) { again = false; sync(); }
+    });
     return busy;
   }
 

@@ -104,8 +104,9 @@ test.before(async () => {
       if (rq.url.startsWith('/api/bot/')) {
         if (rq.headers['x-site-token'] !== KEY) { rs.writeHead(401); return rs.end('{}'); }
         if (rq.url === '/api/bot/order') { rs.writeHead(201); return rs.end('{"ok":true}'); }
-        if (rq.headers['if-none-match'] === '"v1"') { rs.writeHead(304); return rs.end(); }
-        rs.writeHead(200, { 'Content-Type': 'application/json', ETag: '"v1"' });
+        const tag = '"' + crypto.createHash('sha1').update(JSON.stringify(FEED)).digest('hex') + '"';
+        if (rq.headers['if-none-match'] === tag) { rs.writeHead(304); return rs.end(); }
+        rs.writeHead(200, { 'Content-Type': 'application/json', ETag: tag });
         return rs.end(JSON.stringify(FEED));
       }
       if (/^\/(tg-img|media)\//.test(rq.url)) { rs.writeHead(200, { 'Content-Type': 'image/webp' }); return rs.end(WEBP); }
@@ -165,6 +166,16 @@ test('каталог бота — с сайта: комплектации и с�
   assert.ok(fs.existsSync(path.join(DATA_DIR, 'images', s26.images[0])), 'картинка скачана');
   assert.ok(!fs.existsSync(path.join(DATA_DIR, 'images', 'site_stale0000000000000000.webp')), 'лишняя картинка ленты убрана');
   assert.ok(siteHits.some(h => h.url === '/api/bot/catalog' && h.key === KEY), 'лента — по ключу сайта');
+});
+
+test('сайт сообщил об изменении — каталог в боте обновляется сразу, без минутного ожидания', async () => {
+  const changed = (key = KEY) => fetch(BASE + '/api/site/changed', { method: 'POST', headers: key ? { 'X-Site-Token': key } : {} });
+  assert.strictEqual((await changed('wrong')).status, 401);
+  FEED.items[0].price = 77990;
+  const t0 = Date.now();
+  assert.strictEqual((await changed()).status, 202);
+  await waitFor(() => products().some(p => p.siteKey === FEED.items[0].key && p.price === 77990), 3000);
+  assert.ok(Date.now() - t0 < 3000, 'за секунды');
 });
 
 test('/start: кнопочный магазин как раньше — клавиатура внизу, «Открыть в приложении» ведёт на сайт', async () => {

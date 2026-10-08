@@ -918,6 +918,21 @@ async function handleApi(req, res, url) {
     });
   }
 
+  // Сайт: «каталог поменялся» — забираем ленту сразу, не дожидаясь минутной сверки
+  if (p === '/api/site/changed' && method === 'POST') {
+    if (!SITE_LEAD_TOKEN || MULTI || !solo || !solo.siteSync) return json(res, 404, { error: 'not found' });
+    const gate = authguard.check(ip);
+    if (!gate.allowed) return json(res, 429, { error: 'too many attempts' });
+    const given = crypto.createHash('sha256').update(String(req.headers['x-site-token'] || '')).digest();
+    const want = crypto.createHash('sha256').update(SITE_LEAD_TOKEN).digest();
+    if (!crypto.timingSafeEqual(given, want)) {
+      authguard.fail(ip);
+      return json(res, 401, { error: 'unauthorized' });
+    }
+    solo.siteSync.sync();
+    return json(res, 202, { ok: true });
+  }
+
   if (p === '/api/admin/tg-login' && method === 'POST') {
     if (!rateLimit('admin:' + ip, 60, 60000)) return json(res, 429, { error: 'too many requests' });
     const gate = authguard.check(ip);
