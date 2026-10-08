@@ -149,10 +149,9 @@ function createBot(t) {
 
   // Кнопочный магазин включается настройкой bot.classicMenu и работает только
   // в личке: в группах обычная клавиатура и пошаговая форма мешали бы всем.
-  // При внешнем сайте-витрине кнопочного магазина нет: его каталог — свой,
-  // ботовый, и разошёлся бы с сайтом. Покупатель открывает сайт.
+  // При внешнем сайте-витрине его товары приходят с сайта (sitesync.js).
   const classicFor = (s, chat) =>
-    !t.siteUrl && Boolean(s.bot.classicMenu) && (chat.type ? chat.type === 'private' : Number(chat.id) > 0);
+    Boolean(s.bot.classicMenu) && (chat.type ? chat.type === 'private' : Number(chat.id) > 0);
 
   // Кнопка админки: web_app — только в личке и только по https; иначе ссылка.
   // С внешним сайтом панель — его админка: туда пускает та же подпись initData.
@@ -233,19 +232,6 @@ function createBot(t) {
     }
 
     if (classicFor(s, msg.chat) && update.message && await shop.handleMessage(msg, { name })) return;
-
-    // Витрина переехала на сайт, а у покупателя осталась клавиатура кнопочного
-    // магазина: убираем её и даём кнопку сайта.
-    if (t.siteUrl && update.message && Number(chatId) > 0 && shop.isMenuText(text)) {
-      await tgApi('sendMessage', { chat_id: chatId, text: 'Каталог, цены и бронь теперь в приложении магазина 👇', reply_markup: { remove_keyboard: true } });
-      await sendWithFallback({
-        chat_id: chatId,
-        text: `🛍 ${esc(s.brand.shopName)}`,
-        parse_mode: 'HTML',
-        reply_markup: menuKeyboard(s, chatId),
-      }, 'кнопка сайта');
-      return;
-    }
 
     if (text === '/start' || text.startsWith('/start ')) {
       // подписка на анонсы строго опциональна: в приветствии показываем кнопку

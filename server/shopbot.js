@@ -559,6 +559,8 @@ function createShopBot(t, helpers) {
         btn('➡️', `p:${next.id}:${key}:0`),
       ]);
     }
+    // товар с сайта магазина — открыть эту же комплектацию в мини-аппе
+    if (/^https:\/\//i.test(p.siteUrl || '')) kb.push([{ text: '📱 Открыть в приложении', web_app: { url: p.siteUrl } }]);
     const page = idx >= 0 ? Math.floor(idx / pageSize(s)) : 0;
     kb.push([btn('📋 К списку', `l:${key}:${page}`), btn('🏠 Главная', 'h')]);
 
@@ -956,11 +958,17 @@ function createShopBot(t, helpers) {
 
   // ----- поиск -----
 
+  // Каждое слово запроса — где угодно в названии, описании или разделе:
+  // «s26 ultra 512» находит «Galaxy S26 Ultra 12/512 ГБ», порядок слов не важен.
   function runSearch(s, query) {
-    const q = String(query || '').trim().toLowerCase();
-    if (!q) return [];
+    const norm = v => String(v || '').toLowerCase().replace(/ё/g, 'е');
+    const words = norm(query).split(/[\s,.;:!?()«»"']+/).filter(Boolean);
+    if (!words.length) return [];
     return visibleProducts(s)
-      .filter(p => `${p.name} ${p.description || ''} ${p.category || ''}`.toLowerCase().includes(q))
+      .filter(p => {
+        const hay = norm(`${p.name} ${p.description || ''} ${p.category || ''}`);
+        return words.every(w => hay.includes(w));
+      })
       .slice(0, SEARCH_LIMIT)
       .map(p => p.id);
   }

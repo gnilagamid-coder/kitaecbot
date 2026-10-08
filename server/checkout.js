@@ -167,6 +167,8 @@ async function placeOrder(t, { items: rawItems, customer, tgUser, promoCode, sou
   if (source) order.source = source;
   if (promo) consumePromo(t.store, promo.code);
   t.orders.add(order);
+  // копия заказа — внешнему сайту магазина, если он есть (sitesync.js); заказ от этого не зависит
+  if (typeof t.onOrder === 'function') Promise.resolve().then(() => t.onOrder(order)).catch(() => {});
 
   // списываем остатки, если они заданы
   let changed = false;

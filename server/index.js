@@ -18,6 +18,7 @@ require('./env').loadEnv();
 const authguard = require('./authguard');
 const { createTenant } = require('./tenant');
 const { createBackupManager } = require('./backup');
+const { createSiteSync } = require('./sitesync');
 const { sanitize, mergeDeep } = require('./settings');
 const { esc, createTelegram } = require('./telegram');
 const { encryptSecret } = require('./secrets');
@@ -106,6 +107,17 @@ if (!MULTI) {
     tenantId: solo.id || 'shop',
     store: solo.store,
   });
+
+  // Витрина — сайт магазина: товары кнопочного каталога в чате приходят с
+  // него, а заказы из корзины отправляются туда же в «Заявки».
+  if (SITE_URL && SITE_LEAD_TOKEN) {
+    // SITE_API_URL — внутренний адрес сайта на том же сервере (http://127.0.0.1:…),
+    // чтобы не ходить к себе через интернет; нет — тот же SITE_URL
+    const apiUrl = /^https?:\/\/[^\s/]+/i.test(String(process.env.SITE_API_URL || '').trim()) ? String(process.env.SITE_API_URL).trim() : SITE_URL;
+    solo.siteSync = createSiteSync(solo, { siteUrl: SITE_URL, apiUrl, token: SITE_LEAD_TOKEN });
+    solo.onOrder = order => solo.siteSync.pushOrder(order);
+    solo.siteSync.start();
+  }
 }
 
 function currentTenant() {
